@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// Copyright (C) 2018 Jordan Sherer <kn4crd@gmail.com>
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+//
+// Extracted JS8 slot alignment and transmit gating into a Rust API.
+
 //! Transmit-slot alignment and gating.
 
 use crate::protocol::{Js8Protocol, Submode, SubmodeLookup};

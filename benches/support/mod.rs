@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+
 #![allow(dead_code)]
 
 use anyhow::{Result, bail};

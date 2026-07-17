@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// Copyright (C) 2018 Jordan Sherer <kn4crd@gmail.com>
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+//
+// Ported JS8 Varicode framing to Rust and optimized alloc and lookup.
+
 #[cfg(test)]
 use crate::protocol::FrameType;
 use crate::protocol::{FrameFlags, Submode};

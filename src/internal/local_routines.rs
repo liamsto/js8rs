@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// Copyright (C) 2025 Allan Bazinet <w6baz@arrl.net>
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+//
+// Ported JS8 bit packing, CRC validation, and parity data to Rust.
+
 use crate::internal::crc12::crc12;
 
 const ALPHABET: &[u8; 64] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-+";

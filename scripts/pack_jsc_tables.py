@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+
 import argparse
 import os
 import re

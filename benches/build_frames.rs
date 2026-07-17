@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use js8rs::codec::{BuildFramesOptions, build_frames};
 use js8rs::protocol::Submode;

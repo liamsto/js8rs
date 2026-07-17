@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use js8rs::codec::{BuildFramesOptions, build_frames, parse_compound, parse_directed, parse_frame};
 use js8rs::protocol::{DecodeModes, Js8Protocol, Submode, SubmodeLookup};

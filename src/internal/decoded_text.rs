@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// Copyright (C) 2018 Jordan Sherer <kn4crd@gmail.com>
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+//
+// Ported decoded interpretation to Rust.
+
 use crate::{
     codec::DecodedFrame,
     internal::commons::decode_time,

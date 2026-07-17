@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+
 use anyhow::{Result, bail};
 use js8rs::codec::{BuildFramesOptions, build_frames, encode_tones};
 use js8rs::protocol::{DecodeModes, Submode};

@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// Copyright (C) 2018 Jordan Sherer <kn4crd@gmail.com>
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+//
+// Ported shared JS8 constants and decode-time formatting to Rust.
+
 pub const JS8_NTMAX: usize = 60;
 pub const JS8_RX_SAMPLE_RATE: u64 = 12_000;
 pub const JS8_RX_SAMPLE_SIZE: usize = JS8_NTMAX * JS8_RX_SAMPLE_RATE as usize;

@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// Copyright (C) 2025 Punk Kaos <punk.kaos@gmail.com>
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+//
+// Ported LDPC to alloc free Rust.
+
 pub const LLR_ERASURE_THRESHOLD_DEFAULT: f32 = 0.25;
 pub const LLR_FEEDBACK_CONFIDENT_MIN: f32 = 3.0;
 pub const LLR_FEEDBACK_UNCERTAIN_MAX: f32 = 1.0;

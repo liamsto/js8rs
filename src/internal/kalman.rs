@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// Copyright (C) 2025 Punk Kaos <punk.kaos@gmail.com>
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+//
+// Ported freq/timing trackers to Rust and removed Qt diagnostics.
+
 #![allow(dead_code)]
 
 use num_complex::Complex32;

@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// Copyright (C) 2018 Jordan Sherer <kn4crd@gmail.com>
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+//
+// Ported JSC compression to Rust and replaced dynamic maps with packed tables.
+
 use std::{cmp::Ordering, collections::VecDeque};
 
 use crate::varicode::{

@@ -1,12 +1,16 @@
 # js8rs 
 
-`js8rs` is a lightweight Rust library for JS8-compatible framing, encoding, modulation, detection, and decoding, with a focus on performance. It targets wire and radio compatibility with JS8Call-improved without carrying scheduling, UI, or other application concerns.  
+`js8rs` is a lightweight Rust library for JS8-compatible framing, encoding, modulation, detection, and decoding, with a focus on performance. The goal is to present a clean and easy to use API with which to interact with the protocol, while also making optimizations where possible to run on more constrained platforms. I am by no means a performance engineer, so if you have suggestions let me know!
 
 The core receive API is synchronous. `Decoder` is `Send`, so applications can move it to their own thread or runtime and choose their own queueing, backpressure, priority, and shutdown behavior.
 
-## Disclaimer
+This library is experimental, and primarily for my own experiments, both with radio and performance engineering. If you want to use the JS8 protocol normally, you should obviously use JS8Call-improved, which this is adapted from. It is also a WIP, but is fully functional and compatible with JS8Call in its current state.
 
-This library is experimental, and primarily for my own uses. If you want to use the JS8 protocol normally, you should obviously use JS8Call-improved, which this is adapted from. It is also a WIP, but is fully functional in its current state.
+## Copyright
+
+This program is also licensed under the GPLv3. It is derived in large part from GPLv3-licensed JS8Call-improved code. This project is an independent experiment and is not affiliated with nor endorsed by the JS8Call project. It is a derivative of the great work done by Jordan Sherer and the rest of the JS8Call/JS8Call-improved team. 
+
+Please see the [LICENSE](./LICENSE) for more information. See the comment headers in each file for information on modifications made to the original source, where relevant.
 
 ## Quick Start
 

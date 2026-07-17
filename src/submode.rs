@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// Copyright (C) 2024 Allan Bazinet <w6baz@arrl.net>
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+//
+// Ported JS8 submode parameter queries to Rust.
+
 use core::fmt;
 use std::fmt::Display;
 

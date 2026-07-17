@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+
 use js8rs::command::{CommandArg, CommandKind, Target, is_buffered_token, parse_command};
 
 fn parsed(text: &str) -> js8rs::command::ParsedCommand<'_> {

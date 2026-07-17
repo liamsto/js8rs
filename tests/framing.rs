@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+
 use js8rs::codec::{BuildFramesOptions, build_frames, parse_frame};
 use js8rs::protocol::{FrameFlags, FrameType, Submode};
 

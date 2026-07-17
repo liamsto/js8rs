@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// Copyright (C) 2025 Allan Bazinet <w6baz@arrl.net>
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+//
+// Ported DSP and belief-propagation types to Rust.
+
 use core::ops::{Add, AddAssign, Sub};
 use rustfft::{Fft, FftPlanner};
 use std::collections::HashMap;

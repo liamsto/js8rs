@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// Copyright (C) 2025 Allan Bazinet <w6baz@arrl.net>
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+//
+// Ported decoder constants and mode specifications to compile-time Rust data.
+
 use crate::internal::{
     self,
     commons::{

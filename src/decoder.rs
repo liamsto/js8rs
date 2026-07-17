@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// Copyright (C) 2025 Allan Bazinet <w6baz@arrl.net>
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+//
+// Ported the JS8 decoder to Rust and replaced Qt and FFTW integration.
+
 use crate::encoder::encode_with_costas;
 use crate::internal;
 use crate::internal::commons::{DecData, JS8_RX_SAMPLE_SIZE};

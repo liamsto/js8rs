@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+
 use js8rs::protocol::DecodeModes;
 use js8rs::rx::{DecodeConfig, Decoder, Event, SAMPLE_BUFFER_SIZE};
 

@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// Copyright (C) 2025 Allan Bazinet <w6baz@arrl.net>
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+//
+// Ported JS8 CRC-12 calculation to Rust.
+
 const CRC12_BITS: u16 = 12;
 const CRC12_TRUNC_POLY: u16 = 0x0C06;
 const CRC12_MASK: u16 = 0x0FFF;

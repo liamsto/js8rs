@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+
 pub(crate) mod commons;
 pub(crate) mod consts;
 pub(crate) mod costas;

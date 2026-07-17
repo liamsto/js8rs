@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// Copyright (C) 2025 Allan Bazinet <w6baz@arrl.net>
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
+//
+// Ported JS8 channel encoding to Rust and added constant-time lookup tables.
+
 use crate::{
     codec::EncodeError,
     internal::{costas, local_routines::PARITY_MATRIX},
