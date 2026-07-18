@@ -2,6 +2,10 @@
 name = "js8rs"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-only"
+keywords = ["js8", "radio", "dsp"]
+repository = "https://github.com/liamsto/js8rs"
+readme = "README.md"
 
 [dependencies]
 crc = "3.4.0"
