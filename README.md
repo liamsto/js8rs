@@ -25,7 +25,6 @@ assert!(built.frames[0].flags.contains(FrameFlags::FIRST));
 
 let encoded = built.encode()?;
 assert_eq!(encoded[0].tones.len(), 79);
-# Ok::<(), js8rs::codec::EncodeError>(())
 ```
 
 ## Protocol And Codec
