@@ -8,7 +8,7 @@ This library is experimental, and primarily for my own experiments, both with ra
 
 ## Copyright
 
-This program is also licensed under the GPLv3. It is derived in large part from GPLv3-licensed JS8Call-improved code. All code remains a copyright of the original authors, and copyright appears as appropriate on all derived source files.
+This program is licensed under the GPLv3. It is derived in large part from GPLv3-licensed JS8Call-improved code. All code remains a copyright of the original authors, and copyright appears as appropriate on all derived source files.
 
 This project is an independent experiment and is not affiliated with nor endorsed by the JS8Call project. It is a derivative of the great work done by Jordan Sherer and the rest of the JS8Call/JS8Call-improved team. 
 
