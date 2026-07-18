@@ -286,17 +286,17 @@ impl From<Submode> for DecodeModes {
 
 /// Decoder sample rate in hertz.
 pub const RX_SAMPLE_RATE_HZ: u64 = crate::internal::commons::JS8_RX_SAMPLE_RATE;
-/// Fixed decoder ring-buffer length in samples.
+/// Fixed decoder length in number of samples.
 pub const RX_SAMPLE_SIZE: usize = crate::internal::commons::JS8_RX_SAMPLE_SIZE;
-/// Normal-mode nominal transmission duration in seconds.
+/// Normal mode duration in seconds.
 pub const NORMAL_TX_SECONDS: u64 = crate::internal::commons::JS8A_TX_SECONDS;
-/// Fast-mode nominal transmission duration in seconds.
+/// Fast mode duration in seconds.
 pub const FAST_TX_SECONDS: u64 = crate::internal::commons::JS8B_TX_SECONDS;
-/// Turbo-mode nominal transmission duration in seconds.
+/// Turbo mode duration in seconds.
 pub const TURBO_TX_SECONDS: u64 = crate::internal::commons::JS8C_TX_SECONDS;
-/// Slow-mode nominal transmission duration in seconds.
+/// Slow mode duration in seconds.
 pub const SLOW_TX_SECONDS: u64 = crate::internal::commons::JS8E_TX_SECONDS;
-/// Ultra-mode nominal transmission duration in seconds.
+/// Ultra mode duration in seconds.
 pub const ULTRA_TX_SECONDS: u64 = crate::internal::commons::JS8I_TX_SECONDS;
 
 #[inline]

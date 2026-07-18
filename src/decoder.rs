@@ -712,7 +712,7 @@ impl<
         }
 
         let sample_pct = BASELINE_SAMPLE as usize;
-        let max_span = (2 * arm).min(size); // maximum possible span length
+        let max_span = (2 * arm).min(size);
         let mut span_buf: Vec<f32> = Vec::with_capacity(max_span);
 
         for (i, &node_frac) in BASELINE_NODES.iter().enumerate() {
@@ -788,7 +788,6 @@ impl<
         // the non-redundant bins [0..NDFFT1/2].
         let buf = &mut self.ds_time;
 
-        // Copy dd into real parts and zero-pad the remainder.
         let dd_len = self.dd.len();
         for (i, slot) in buf.iter_mut().enumerate().take(Mode::NDFFT1) {
             let re = if i < dd_len { self.dd[i] } else { 0.0 };
@@ -820,18 +819,15 @@ impl<
         let ndd_size = Mode::NDD + 1;
         let range_size = (it - ib + 1).max(0) as usize;
 
-        // Zero the working band region.
         for v in &mut self.cd0[..Mode::NDFFT2] {
             *v = ZERO;
         }
 
-        // Copy the band from ds_cx into cd0[0..range_size].
         if range_size != 0 {
             let ib_u = ib as usize;
             self.cd0[..range_size].copy_from_slice(&self.ds_cx[ib_u..ib_u + range_size]);
         }
 
-        // Apply tapers (head reversed, tail normal).
         {
             let head = 0usize;
             let tail = range_size;
@@ -847,19 +843,16 @@ impl<
             }
         }
 
-        // Rotate to center (within the first NDFFT2 bins).
         let shift = (i0 - ib) as isize;
         if shift != 0 && Mode::NDFFT2 != 0 {
             rotate_left_complex(&mut self.cd0[..Mode::NDFFT2], shift);
         }
 
-        // Inverse FFT back to time domain (length NDFFT2).
         let ifft = self
             .plans
             .get_or_create(FftPlanType::DS, Mode::NDFFT2, /*inverse=*/ true);
         ifft.process(&mut self.cd0[..Mode::NDFFT2]);
 
-        // Normalize.
         let factor = 1.0 / sqrtf((Mode::NDFFT1 as f32) * (Mode::NDFFT2 as f32));
         for v in &mut self.cd0[..Mode::NDFFT2] {
             *v *= factor;
@@ -870,10 +863,8 @@ impl<
         let costas = Self::costas();
         let costas = costas.map(|row| row.map(usize::from));
 
-        // Compute symbol spectra.
         self.savg.fill(0.0);
 
-        // Requires a scratch buffer `self.sd_time: [Complex32; Mode::NFFT1]`.
         let fft = self
             .plans
             .get_or_create(FftPlanType::SD, Mode::NFFT1, false);
@@ -891,7 +882,6 @@ impl<
 
             fft.process(self.sd_time.as_mut_slice());
 
-            // Power spectrum for i=0..NSPS
             for i in 0..Mode::NSPS {
                 let power = self.sd_time[i].norm_sqr();
                 self.s[i][j] = power;
@@ -899,7 +889,6 @@ impl<
             }
         }
 
-        // Filter edge sanity measures.
         let nwin = nfb - nfa;
         let (_orig_nfa, _orig_nfb) = (nfa, nfb);
 
@@ -920,10 +909,8 @@ impl<
         let ia = max(0, roundf(nfa as f32 / Mode::DF) as i32);
         let ib = roundf(nfb as f32 / Mode::DF) as i32;
 
-        // Baseline replaces average spectrum.
         self.baselinejs8(ia, ib);
 
-        // Compute sync metric for each frequency bin in [ia, ib].
         let timing_count = (2 * Mode::JZ + 1) as usize;
         let mut costas_power: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0; timing_count]);
         let mut total_power: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0; timing_count]);
@@ -1018,7 +1005,6 @@ impl<
             return Vec::new();
         }
 
-        // Normalize to 40th percentile (ascending).
         let mut vals: Vec<f32> = entries.iter().map(|e| e.sync).collect();
         let q_idx = (vals.len() * 4) / 10;
         vals.select_nth_unstable_by(q_idx, f32::total_cmp);
@@ -1052,7 +1038,6 @@ impl<
         candidates
     }
 
-    /// Fortran-compatible modulo wrap for phase values into [0, TAU).
     #[inline]
     fn wrap_phase(mut phi: f32) -> f32 {
         phi = fmodf(phi, TAU);
@@ -1062,12 +1047,8 @@ impl<
         phi
     }
 
-    /// Total synchronization power for a given start index and fine frequency tweak.
     fn syncjs8d(&self, i0: i32, delf: f32) -> f32 {
         let base_dphi: f32 = TAU * ((Mode::NDOWN as f32) / 12000.0);
-
-        // Frequency adjustment array.
-
         let mut freq_adjust = [Complex32::new(1.0, 0.0); NDOWNSPS];
 
         if delf != 0.0 {
@@ -1101,7 +1082,6 @@ impl<
                 let mut acc = Complex32::new(0.0, 0.0);
 
                 for (k, adjust) in freq_adjust.iter().enumerate().take(Mode::NDOWNSPS) {
-                    // cd0[offset+k] * conj(freq_adjust[k] * csyncs[block][col][k])
                     let rot = *adjust * self.csyncs[block][col][k];
                     acc += self.cd0[offset_u + k] * rot.conj();
                 }
@@ -1113,7 +1093,6 @@ impl<
         sync_power
     }
 
-    /// Generate a time-domain reference signal for a tone sequence at base frequency f0.
     fn genjs8refsig(&self, itone: &[u8; NN], f0: f32) -> Vec<Complex32> {
         let bfpi: f32 = TAU * f0 * (1.0 / 12000.0);
         let mut phi: f32 = 0.0;
@@ -1146,11 +1125,8 @@ impl<
         cref
     }
 
-    /// Subtract a reconstructed JS8 signal using the frequency-domain filter.
-    ///
-    /// `dt` may be negative.
     fn subtractjs8(&mut self, cref: &[Complex32], dt: f32) {
-        let nstart: i32 = (dt * 12000.0) as i32; // trunc toward zero (C++ static_cast<int>)
+        let nstart: i32 = (dt * 12000.0) as i32;
         let cref_start: usize = if nstart < 0 { (-nstart) as usize } else { 0 };
         let dd_start: usize = if nstart > 0 { nstart as usize } else { 0 };
 
@@ -1160,41 +1136,33 @@ impl<
 
         let size = core::cmp::min(cref.len() - cref_start, self.dd.len() - dd_start);
 
-        // Populate cfilt with dd * conj(cref)
         for i in 0..size {
             self.cfilt[i] =
                 Complex32::new(self.dd[dd_start + i], 0.0) * cref[cref_start + i].conj();
         }
-        // Zero remainder
         for i in size..Mode::NMAX {
             self.cfilt[i] = Complex32::new(0.0, 0.0);
         }
 
-        // FFT -> freq domain
         let fft_fwd = self.plans.get_or_create(FftPlanType::CF, Mode::NMAX, false);
         fft_fwd.process(self.cfilt.as_mut_slice());
 
-        // Apply frequency-domain filter
         for i in 0..Mode::NMAX {
             self.cfilt[i] *= self.filter[i];
         }
 
-        // Inverse FFT -> time domain (unnormalized, matches FFTW backward)
         let fft_inv = self.plans.get_or_create(FftPlanType::CB, Mode::NMAX, true);
         fft_inv.process(self.cfilt.as_mut_slice());
 
-        // Subtract reconstructed signal: dd -= 2*Re{cref * cfilt}
         for i in 0..size {
             let recon = self.cfilt[i] * cref[cref_start + i];
             self.dd[dd_start + i] = 2.0f32.mul_add(-recon.re, self.dd[dd_start + i]);
         }
     }
 
-    /// C++ constructor equivalent
     pub fn new() -> Self {
         let mut this = Self::zeroed();
 
-        // Nuttal window init
         const A0: f32 = 0.363_581_9;
         const A1: f32 = -0.489_177_5;
         const A2: f32 = 0.136_599_5;
@@ -1217,12 +1185,10 @@ impl<
             sum += value;
         }
 
-        // Normalize Nuttal window.
         for v in &mut this.nuttal {
             *v = (*v / sum) * (Mode::NFFT1 as f32) / 300.0;
         }
 
-        // Costas waveforms.
         let costas = Self::costas();
         for (i, ((tone_a, tone_b), tone_c)) in costas[0]
             .iter()
@@ -1250,7 +1216,6 @@ impl<
             }
         }
 
-        // Build Hann-like window into filter[0..NFILT+1], normalize, zero rest.
         let mut filt_sum = 0.0f32;
         for j in (-NFILT / 2)..=(NFILT / 2) {
             let index = (j + NFILT / 2) as usize;
@@ -1259,7 +1224,6 @@ impl<
             filt_sum += value;
         }
 
-        // Normalize first NFILT+1 and zero remainder.
         for i in 0..=(NFILT as usize) {
             let re = this.filter[i].re / filt_sum;
             this.filter[i] = Complex32::new(re, 0.0);
@@ -1267,11 +1231,7 @@ impl<
         for i in (NFILT as usize + 1)..Mode::NMAX {
             this.filter[i] = Complex32::new(0.0, 0.0);
         }
-
-        // Rotate within [0..NFILT+1) by NFILT/2.
         this.filter[..=(NFILT as usize)].rotate_left((NFILT / 2) as usize);
-
-        // FFT filter into frequency domain and normalize by 1/NMAX.
         let fft = this.plans.get_or_create(FftPlanType::CF, Mode::NMAX, false);
         fft.process(this.filter.as_mut_slice());
         let factor = 1.0f32 / (Mode::NMAX as f32);
@@ -1457,12 +1417,10 @@ impl<
 }
 
 fn solve_square<const N: usize>(a: &[[f64; N]; N], b: &[f64; N]) -> [f64; N] {
-    // Gaussian elimination with partial pivoting on a square system.
     let mut m = *a;
     let mut rhs = *b;
 
     for k in 0..N {
-        // pivot
         let mut piv = k;
         let mut piv_val = m[k][k].abs();
         let mut i = k + 1;
@@ -1484,7 +1442,6 @@ fn solve_square<const N: usize>(a: &[[f64; N]; N], b: &[f64; N]) -> [f64; N] {
             continue;
         }
 
-        // eliminate
         let mut i = k + 1;
         while i < N {
             let f = m[i][k] / diag;
@@ -1499,7 +1456,6 @@ fn solve_square<const N: usize>(a: &[[f64; N]; N], b: &[f64; N]) -> [f64; N] {
         }
     }
 
-    // back-substitution
     let mut x = [0.0f64; N];
     for i in (0..N).rev() {
         let mut s = rhs[i];
@@ -1514,7 +1470,6 @@ fn solve_square<const N: usize>(a: &[[f64; N]; N], b: &[f64; N]) -> [f64; N] {
 }
 
 const fn rotate_left_complex(buf: &mut [Complex32], shift: isize) {
-    // shift may be larger than len; bring into [0, len).
     let len = buf.len();
     if len == 0 {
         return;
@@ -1543,11 +1498,11 @@ pub struct DecoderCore {
     i: Option<Box<DecodeUltra>>,
 }
 
-pub const ENABLE_NORMAL: u8 = 1 << 0; // 00001
-pub const ENABLE_FAST: u8 = 1 << 1; // 00010
-pub const ENABLE_TURBO: u8 = 1 << 2; // 00100
-pub const ENABLE_SLOW: u8 = 1 << 3; // 01000
-pub const ENABLE_ULTRA: u8 = 1 << 4; // 10000
+pub const ENABLE_NORMAL: u8 = 1 << 0;
+pub const ENABLE_FAST: u8 = 1 << 1;
+pub const ENABLE_TURBO: u8 = 1 << 2;
+pub const ENABLE_SLOW: u8 = 1 << 3;
+pub const ENABLE_ULTRA: u8 = 1 << 4;
 
 impl DecoderCore {
     pub(crate) fn decode_pass<E>(&mut self, data: &mut DecData<'_>, emit: &mut E) -> usize

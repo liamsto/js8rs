@@ -14,13 +14,6 @@ pub const LLR_FEEDBACK_MAX_MAG: f32 = 6.0;
 pub const LDPC_FEEDBACK_MAX_PASSES_DEFAULT: u8 = 8;
 
 /// Refines LLRs using decoded codeword feedback.
-/// Positive LLR corresponds to bit=1; negative to bit=0, this is a convention preserved from the C++ source.
-///
-/// - `llr_in`: input LLRs
-/// - `cw`: decoded codeword bits (nonzero => 1)
-/// - `erasure_threshold`: if > 0.0, shrunk magnitudes below this are erased to 0.0
-/// - `llr_out`: output LLRs (initialized to `llr_in` then adjusted)
-/// - `confident_count` / `uncertain_count`: counters for diagnostics/telemetry
 pub const fn refine_llrs_with_ldpc_feedback<const N: usize>(
     llr_in: &[f32; N],
     cw: &[i8; N],

@@ -14,7 +14,7 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug)]
 pub struct KahanSum<T> {
     sum: T,
-    c: T, // compensation
+    c: T,
 }
 
 impl<T> KahanSum<T>

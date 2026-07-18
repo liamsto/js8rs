@@ -221,7 +221,6 @@ impl Detector {
             InputFormat::StereoLeft | InputFormat::StereoAverage => (data.len() / 2, 2usize),
         };
 
-        // How many 48 kHz frames we can accept before `d2` fills.
         let remaining_12k = JS8_RX_SAMPLE_SIZE.saturating_sub(g.kin);
         let frames_acceptable = remaining_12k * NDOWN;
 
@@ -235,7 +234,6 @@ impl Detector {
             let cap = g.samples_per_fft * NDOWN - g.buffer_pos;
             let num = cap.min(remaining);
 
-            // Store into 48 kHz staging buffer (mono).
             let start_frame = frames_accepted - remaining;
 
             let buffer_pos = g.buffer_pos;
@@ -343,7 +341,7 @@ fn second_in_period(period_s: u64) -> u64 {
 struct FirDecimator49x4 {
     h: [f32; NTAPS],
     z: [f32; NTAPS * 2],
-    w: usize, // start of the contiguous newest-to-oldest window
+    w: usize,
 }
 
 impl FirDecimator49x4 {
@@ -368,16 +366,14 @@ impl FirDecimator49x4 {
 
     /// Feed 4 new samples, compute one output.
     ///
-    /// Output conversion uses truncation toward zero (Rust `as i32`), then saturates to i16.
+    /// Output conversion uses truncation toward zero (using `i32::from()`), then saturates to i16.
     #[inline]
     fn down_sample_i16(&mut self, x4: [i16; NDOWN]) -> i16 {
-        // Advance state by 4 samples (order preserved).
         self.push(f32::from(x4[0]));
         self.push(f32::from(x4[1]));
         self.push(f32::from(x4[2]));
         self.push(f32::from(x4[3]));
 
-        // Fold the exactly symmetric coefficients around the center tap.
         let samples = &self.z[self.w..self.w + NTAPS];
         let mut acc = 0.0f32;
         for k in 0..NTAPS / 2 {
@@ -385,8 +381,6 @@ impl FirDecimator49x4 {
             acc = self.h[k].mul_add(pair, acc);
         }
         acc = self.h[NTAPS / 2].mul_add(samples[NTAPS / 2], acc);
-
-        // Truncate toward zero then saturate.
         let yi = acc as i32;
         if yi > i32::from(i16::MAX) {
             i16::MAX

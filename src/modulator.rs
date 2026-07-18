@@ -15,7 +15,7 @@ use std::f64::consts::TAU;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
-/// Operating state (thread-safe to read via [`Modulator::is_idle`]).
+/// Operating state.
 #[non_exhaustive]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
@@ -340,14 +340,9 @@ impl Modulator {
                         self.m_silent_frames -= 1;
                         frames_generated -= 1;
                     }
-
-                    // Reconstruct frames_generated the way the C++ code effectively returns:
-                    // after the loop, cursor tells us how many frames were actually written.
                     if self.m_silent_frames == 0 {
                         self.state_store(State::Active);
                     }
-
-                    // Fall through into Active behavior if buffer not full (C++ uses [[fallthrough]]).
                 } else {
                     self.state_store(State::Active);
                 }

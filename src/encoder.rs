@@ -46,11 +46,6 @@ pub const fn crc12(data: &[u8]) -> u16 {
 }
 
 /// Encode a 12-character JS8 message into 79 tones.
-///
-/// - `typ`: lower 3 bits are the frame type
-/// - `costas`: 3 Costas arrays, each 7 symbols
-/// - `message`: exactly 12 bytes (ASCII); characters must exist in `ALPHABET`
-/// - `tones`: output buffer, 79 symbols
 pub(crate) fn encode_with_costas(
     typ: u8,
     costas: &[[u8; COSTAS_LEN]; COSTAS_COUNT],
@@ -79,7 +74,6 @@ pub(crate) fn encode_with_costas(
     bytes[9] |= ((c >> 7) as u8) & 0x1F;
     bytes[10] = ((c & 0x7F) as u8) << 1;
 
-    // Costas arrays at offsets 0, 36, 72.
     for (k, pattern) in costas.iter().enumerate().take(COSTAS_COUNT) {
         let base = k * 36;
         tones[base..(COSTAS_LEN + base)].copy_from_slice(&pattern[..COSTAS_LEN]);

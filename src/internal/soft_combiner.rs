@@ -73,8 +73,8 @@ impl<const N: usize> SoftCombiner<N> {
     ) -> SoftCombinerKey {
         SoftCombinerKey {
             mode,
-            freq_bin: f1.round() as i32,        // lround
-            dt_bin: (dt * 10.0).round() as i32, // 100 ms bins
+            freq_bin: f1.round() as i32,
+            dt_bin: (dt * 10.0).round() as i32,
             signature: Self::signature(llr0, llr1),
         }
     }
