@@ -7,7 +7,7 @@ use cpal::{
 };
 use js8rs::{
     codec::{BuildFramesOptions, EncodedFrame, build_frames},
-    protocol::{Js8Protocol, Submode, SubmodeLookup, submode_name},
+    protocol::Submode,
     timing::{TxTimingConfig, compute_slot, unix_time_ms},
     tx::{Channel, Modulator},
 };
@@ -27,7 +27,7 @@ const RENDER_BLOCK_FRAMES: usize = 4096;
 fn main() -> Result<(), Box<dyn Error>> {
     let args = parse_args(env::args().skip(1).collect())?;
 
-    let period_seconds = <Js8Protocol as SubmodeLookup>::period_seconds(args.submode);
+    let period_seconds = args.submode.period_seconds();
     let tx_delay = Duration::from_secs_f64(args.tx_delay_seconds);
     let timing_cfg = TxTimingConfig::new(tx_delay, Duration::from_secs(period_seconds));
 
@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!(
         "Prepared {} frame(s) in {} mode (period={}s, tx_delay={}s).",
         tx_frames.len(),
-        submode_name(args.submode),
+        args.submode.name(),
         period_seconds,
         args.tx_delay_seconds
     );

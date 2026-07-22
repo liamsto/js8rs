@@ -7,9 +7,7 @@
 
 //! Helpers for selecting decoder sample windows.
 
-use crate::protocol::{
-    Submode, compute_cycle_for_decode, submode_samples_needed, submode_samples_per_period,
-};
+use crate::protocol::Submode;
 
 /// Per-submode cursor used to avoid duplicate decode windows.
 #[non_exhaustive]
@@ -51,9 +49,9 @@ pub fn next_decode_window(
     k0: usize,
     cursor: &mut DecodeCursor,
 ) -> Option<DecodeWindow> {
-    let cycle_frames = submode_samples_per_period(submode) as usize;
-    let frames_needed = submode_samples_needed(submode) as usize;
-    let current_cycle = compute_cycle_for_decode(submode, k);
+    let cycle_frames = submode.samples_per_period();
+    let frames_needed = submode.samples_needed() as usize;
+    let current_cycle = submode.compute_cycle_for_decode(k);
     let delta = k.abs_diff(k0);
 
     if cycle_frames == 0 {
@@ -145,10 +143,6 @@ impl DecodeScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{
-        compute_cycle_for_decode, submode_samples_needed, submode_samples_per_period,
-    };
-
     #[test]
     fn initializes_cursor_and_waits_until_window_is_ready() {
         let mut cursor = DecodeCursor::new();
@@ -162,12 +156,12 @@ mod tests {
     #[test]
     fn emits_window_with_expected_cycle_start_and_size() {
         let mut cursor = DecodeCursor::new();
-        let period = submode_samples_per_period(Submode::Fast) as usize;
-        let need = submode_samples_needed(Submode::Fast) as usize;
+        let period = Submode::Fast.samples_per_period();
+        let need = Submode::Fast.samples_needed() as usize;
         let k = period + need + 500;
         let window = next_decode_window(Submode::Fast, k, 0, &mut cursor).expect("window ready");
 
-        assert_eq!(window.cycle, compute_cycle_for_decode(Submode::Fast, k));
+        assert_eq!(window.cycle, Submode::Fast.compute_cycle_for_decode(k));
         assert_eq!(window.start, period);
         assert_eq!(window.size, need.max(k - period));
     }
@@ -188,13 +182,13 @@ mod tests {
             current_start: Some(0),
             next_start: Some(1),
         };
-        let period = submode_samples_per_period(Submode::Turbo) as usize;
+        let period = Submode::Turbo.samples_per_period();
         let _ = next_decode_window(Submode::Turbo, period * 3, 0, &mut cursor);
         assert_eq!(
             cursor.current_start,
             Some(
-                compute_cycle_for_decode(Submode::Turbo, period * 3)
-                    * submode_samples_per_period(Submode::Turbo) as usize
+                Submode::Turbo.compute_cycle_for_decode(period * 3)
+                    * Submode::Turbo.samples_per_period()
             )
         );
     }

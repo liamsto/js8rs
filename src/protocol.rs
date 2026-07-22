@@ -203,10 +203,19 @@ impl fmt::Display for SubmodeParseError {
 
 impl std::error::Error for SubmodeParseError {}
 
-#[inline]
-/// Converts the numeric JS8 submode representation without panicking.
-pub fn submode_from_i32(value: i32) -> Result<Submode, SubmodeParseError> {
-    value.try_into().map_err(|_| SubmodeParseError { value })
+impl TryFrom<i32> for Submode {
+    type Error = SubmodeParseError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Normal),
+            1 => Ok(Self::Fast),
+            2 => Ok(Self::Turbo),
+            4 => Ok(Self::Slow),
+            8 => Ok(Self::Ultra),
+            _ => Err(SubmodeParseError { value }),
+        }
+    }
 }
 
 /// Set of submodes selected for a decoder pass.
@@ -301,137 +310,6 @@ pub const ULTRA_TX_SECONDS: u64 = crate::internal::commons::JS8I_TX_SECONDS;
 
 #[inline]
 #[must_use]
-/// Returns the maximum decoder window length for a submode.
-pub const fn decode_nmax_frames(submode: Submode) -> usize {
-    match submode {
-        Submode::Normal => (NORMAL_TX_SECONDS * RX_SAMPLE_RATE_HZ) as usize,
-        Submode::Fast => (FAST_TX_SECONDS * RX_SAMPLE_RATE_HZ) as usize,
-        Submode::Turbo => (TURBO_TX_SECONDS * RX_SAMPLE_RATE_HZ) as usize,
-        Submode::Slow => (SLOW_TX_SECONDS * RX_SAMPLE_RATE_HZ) as usize,
-        Submode::Ultra => (ULTRA_TX_SECONDS * RX_SAMPLE_RATE_HZ) as usize,
-    }
-}
-
-#[inline]
-#[must_use]
-/// Returns the display name of a submode.
-pub const fn submode_name(submode: Submode) -> &'static str {
-    crate::submode::name(submode)
-}
-
-#[inline]
-#[must_use]
-/// Returns the occupied bandwidth in hertz.
-pub const fn submode_bandwidth_hz(submode: Submode) -> u64 {
-    crate::submode::bandwidth(submode)
-}
-
-#[inline]
-#[must_use]
-/// Returns samples used to transmit all symbols in a frame.
-pub const fn submode_samples_for_symbols(submode: Submode) -> u64 {
-    crate::submode::samples_for_symbols(submode)
-}
-
-#[inline]
-#[must_use]
-/// Returns samples needed for a complete receive capture.
-pub const fn submode_samples_needed(submode: Submode) -> u64 {
-    crate::submode::samples_needed(submode)
-}
-
-#[inline]
-#[must_use]
-/// Returns decoder samples in one submode period.
-pub const fn submode_samples_per_period(submode: Submode) -> u64 {
-    crate::submode::samples_per_period(submode)
-}
-
-#[inline]
-#[must_use]
-/// Returns the nominal receive SNR threshold in decibels.
-pub const fn submode_rx_snr_threshold(submode: Submode) -> i32 {
-    crate::submode::rx_snr_threshold(submode)
-}
-
-#[inline]
-#[must_use]
-/// Returns the decoder sync threshold.
-pub const fn submode_rx_threshold(submode: Submode) -> i32 {
-    crate::submode::rx_threshold(submode)
-}
-
-#[inline]
-#[must_use]
-/// Returns the receive cycle containing sample position `k`.
-pub const fn compute_cycle_for_decode(submode: Submode, k: usize) -> usize {
-    crate::submode::compute_cycle_for_decode(submode, k)
-}
-
-#[inline]
-#[must_use]
-/// Returns the receive cycle after applying an alternate sample offset.
-pub const fn compute_alt_cycle_for_decode(
-    submode: Submode,
-    k: usize,
-    offset_frames: usize,
-) -> usize {
-    crate::submode::compute_alt_cycle_for_decode(submode, k, offset_frames)
-}
-
-/// Static submode properties used by advanced timing and modulation seams.
-pub trait SubmodeLookup {
-    /// Returns 12 kHz samples per symbol.
-    fn samples_for_one_symbol(submode: Submode) -> f64;
-    /// Returns tone spacing in hertz.
-    fn tone_spacing(submode: Submode) -> f64;
-    /// Returns slot period in seconds.
-    fn period_seconds(submode: Submode) -> u64;
-    /// Returns nominal slot start delay in milliseconds.
-    fn start_delay_ms(submode: Submode) -> u64;
-    /// Returns waveform duration in seconds.
-    fn tx_duration(submode: Submode) -> f64;
-    /// Returns the transmit-to-slot duration ratio.
-    fn compute_ratio(submode: Submode) -> f64;
-    /// Returns the late-start threshold scale.
-    fn late_threshold_multiplier(submode: Submode) -> f64;
-}
-
-/// Standard JS8 protocol property lookup.
-pub struct Js8Protocol;
-
-impl SubmodeLookup for Js8Protocol {
-    fn samples_for_one_symbol(submode: Submode) -> f64 {
-        crate::submode::samples_for_one_symbol(submode) as f64
-    }
-
-    fn tone_spacing(submode: Submode) -> f64 {
-        crate::submode::tone_spacing(submode)
-    }
-
-    fn period_seconds(submode: Submode) -> u64 {
-        crate::submode::period_seconds(submode)
-    }
-
-    fn start_delay_ms(submode: Submode) -> u64 {
-        crate::submode::start_delay_ms(submode)
-    }
-
-    fn tx_duration(submode: Submode) -> f64 {
-        crate::submode::tx_duration(submode)
-    }
-
-    fn compute_ratio(submode: Submode) -> f64 {
-        crate::submode::compute_ratio(submode, crate::submode::period_seconds(submode) as f64)
-    }
-
-    fn late_threshold_multiplier(submode: Submode) -> f64 {
-        crate::submode::late_threshold_multiplier(submode)
-    }
-}
-
-#[inline]
-#[must_use]
 /// Packs hour, minute, and second into the decoder's `HHMMSS` integer form.
 pub const fn code_time(hour: u8, minute: u8, second: u8) -> u32 {
     (hour as u32) * 10000 + (minute as u32) * 100 + (second as u32)
@@ -457,15 +335,15 @@ mod tests {
 
     #[test]
     fn submode_conversion_and_decode_lengths_are_valid() {
-        assert_eq!(submode_from_i32(0).unwrap(), Submode::Normal);
-        assert_eq!(submode_from_i32(1).unwrap(), Submode::Fast);
-        assert!(submode_from_i32(3).is_err());
+        assert_eq!(Submode::try_from(0).unwrap(), Submode::Normal);
+        assert_eq!(Submode::try_from(1).unwrap(), Submode::Fast);
+        assert_eq!(Submode::try_from(3), Err(SubmodeParseError { value: 3 }));
 
-        assert_eq!(decode_nmax_frames(Submode::Normal), 180_000);
-        assert_eq!(decode_nmax_frames(Submode::Fast), 120_000);
-        assert_eq!(decode_nmax_frames(Submode::Turbo), 72_000);
-        assert_eq!(decode_nmax_frames(Submode::Slow), 360_000);
-        assert_eq!(decode_nmax_frames(Submode::Ultra), 48_000);
+        assert_eq!(Submode::Normal.samples_per_period(), 180_000);
+        assert_eq!(Submode::Fast.samples_per_period(), 120_000);
+        assert_eq!(Submode::Turbo.samples_per_period(), 72_000);
+        assert_eq!(Submode::Slow.samples_per_period(), 360_000);
+        assert_eq!(Submode::Ultra.samples_per_period(), 48_000);
     }
 
     #[test]

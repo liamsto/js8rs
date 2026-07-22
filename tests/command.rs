@@ -188,14 +188,11 @@ fn command_wire_metadata_matches_js8call_tables() {
     assert_eq!(CommandKind::QueryMsg.wire_code(), Some(11));
     assert_eq!(CommandKind::Cq.wire_code(), None);
     assert_eq!(CommandKind::Msg.wire_token(), Some(" MSG"));
+    assert_eq!(CommandKind::Cq.wire_token(), Some(" CQ"));
 
     assert!(CommandKind::SnrQuery.is_autoreply());
     assert!(CommandKind::AgainQuery.is_autoreply());
     assert!(!CommandKind::Status.is_autoreply());
-    assert!(CommandKind::Msg.is_buffered());
-    assert!(CommandKind::Snr.is_buffered());
-    assert!(CommandKind::Msg.is_buffered_code());
-    assert!(!CommandKind::Snr.is_buffered_code());
     assert!(is_buffered_token(" SNR?"));
     assert!(is_buffered_token(">"));
     assert!(is_buffered_token(" CQ"));

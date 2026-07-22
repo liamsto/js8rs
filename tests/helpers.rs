@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use js8rs::codec::{BuildFramesOptions, EncodeError, build_frames, encode_tones, parse_frame};
-use js8rs::protocol::{Submode, decode_nmax_frames};
+use js8rs::protocol::Submode;
 use js8rs::rx::{
     DecodeCursor, MessageBufferAssembler, ReassemblyEvent, next_decode_window, window_from_kin,
 };
@@ -50,8 +50,8 @@ fn build_result_encode_matches_per_frame_encoding() -> Result<()> {
 #[test]
 fn decode_window_clamps_each_selected_mode_span() {
     let kin = 200_000;
-    let expected_a = window_from_kin(kin, decode_nmax_frames(Submode::Normal));
-    let expected_b = window_from_kin(kin, decode_nmax_frames(Submode::Fast));
+    let expected_a = window_from_kin(kin, Submode::Normal.samples_per_period());
+    let expected_b = window_from_kin(kin, Submode::Fast.samples_per_period());
 
     assert_eq!(expected_a, (20_000, 180_000));
     assert_eq!(expected_b, (80_000, 120_000));

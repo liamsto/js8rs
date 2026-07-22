@@ -96,7 +96,7 @@ assert_eq!(frames, stereo.len() / 2);
 # Ok::<(), js8rs::codec::EncodeError>(())
 ```
 
-`timing::compute_slot` uses standard JS8 protocol data. `compute_slot_with` and `Modulator::start_tones_with` have a custom `SubmodeLookup` support. These may or may not be deprecated later on. Durations use `std::time::Duration` and Unix timestamps are in ms.
+`timing::compute_slot` and `Modulator::start_tones` use the protocol properties exposed by `Submode`. Durations use `std::time::Duration` and Unix timestamps are in ms.
 
 ## Benchmarking
 

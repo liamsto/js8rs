@@ -3,7 +3,7 @@
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use js8rs::codec::{BuildFramesOptions, build_frames, parse_compound, parse_directed, parse_frame};
-use js8rs::protocol::{DecodeModes, Js8Protocol, Submode, SubmodeLookup};
+use js8rs::protocol::{DecodeModes, Submode};
 use js8rs::rx::{Decoder, Detector, InputFormat, SAMPLE_BUFFER_SIZE};
 use js8rs::tx::{Channel, Modulator};
 use std::{hint::black_box, time::Duration};
@@ -118,7 +118,7 @@ fn bench_modulator_render(c: &mut Criterion) {
                 modulator.start_tones(
                     &tones,
                     Submode::Fast,
-                    Js8Protocol::start_delay_ms(Submode::Fast),
+                    Submode::Fast.start_delay_ms(),
                     1500.0,
                     Duration::ZERO,
                     Channel::Mono,

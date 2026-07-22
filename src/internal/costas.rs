@@ -36,7 +36,7 @@ pub const fn for_type(t: Type) -> &'static Array {
 fn costas_normal_is_original() {
     let d = crate::submode::NORMAL;
     assert_eq!(
-        d.costas_type() as u8,
+        d.costas as u8,
         crate::internal::costas::Type::Original as u8
     );
 }

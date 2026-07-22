@@ -7,7 +7,7 @@
 
 //! Transmit-slot alignment and gating.
 
-use crate::protocol::{Js8Protocol, Submode, SubmodeLookup};
+use crate::protocol::Submode;
 use core::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -31,10 +31,7 @@ impl TxTimingConfig {
     /// Creates configuration whose transceiver period matches `submode`.
     #[must_use]
     pub fn for_submode(tx_delay: Duration, submode: Submode) -> Self {
-        Self::new(
-            tx_delay,
-            Duration::from_secs(Js8Protocol::period_seconds(submode)),
-        )
+        Self::new(tx_delay, Duration::from_secs(submode.period_seconds()))
     }
 
     /// Returns the configured transmit delay.
@@ -130,20 +127,7 @@ pub struct TimingParams {
 /// second boundaries), since slot alignment is modulo `period_ms`.
 #[must_use]
 pub fn compute_slot(submode: Submode, now_unix_ms: u64, config: TxTimingConfig) -> TransmitSlot {
-    compute_slot_with::<Js8Protocol>(submode, now_unix_ms, config)
-}
-
-/// Computes a transmit slot using a custom protocol lookup.
-///
-/// This is primarily an advanced integration and testing seam. Normal JS8
-/// callers should use [`compute_slot`].
-#[must_use]
-pub fn compute_slot_with<L: SubmodeLookup>(
-    submode: Submode,
-    now_unix_ms: u64,
-    config: TxTimingConfig,
-) -> TransmitSlot {
-    let period_seconds = L::period_seconds(submode);
+    let period_seconds = submode.period_seconds();
     let period_ms = period_seconds.saturating_mul(1000);
 
     // Avoid division-by-zero behavior if caller supplies invalid lookup data.
@@ -161,7 +145,7 @@ pub fn compute_slot_with<L: SubmodeLookup>(
         seconds_into_slot / (period_seconds as f64)
     };
 
-    let tx_duration_seconds = L::tx_duration(submode);
+    let tx_duration_seconds = submode.tx_duration();
     let tx_window_end_ms = slot_start_ms.saturating_add((tx_duration_seconds * 1000.0) as u64);
 
     // tx-delay window starts at end-of-slot minus tx_delay.
@@ -179,9 +163,9 @@ pub fn compute_slot_with<L: SubmodeLookup>(
         period_seconds as f64
     };
 
-    let ratio = L::compute_ratio(submode);
+    let ratio = submode.compute_ratio();
     let mut late_threshold = ratio - (tx_delay_seconds / tr_period_seconds);
-    late_threshold *= L::late_threshold_multiplier(submode);
+    late_threshold *= submode.late_threshold_multiplier();
 
     // Convert fraction threshold into an absolute ms boundary.
     // JS8Call uses strict `< lateThreshold`; so this is "exclusive".
@@ -243,30 +227,6 @@ impl TransmitSlot {
         self.now_unix_ms / self.period_ms
     }
 
-    /// Start timestamp of the next slot boundary (strictly greater than now unless `period_ms==0`).
-    #[must_use]
-    pub const fn next_slot_start_ms(&self) -> u64 {
-        self.slot_end_ms
-    }
-
-    /// Timestamp for the start of the current slot (UTC-aligned).
-    #[must_use]
-    pub const fn current_slot_start_ms(&self) -> u64 {
-        self.slot_start_ms
-    }
-
-    /// Timestamp when the TX payload window ends for this slot.
-    #[must_use]
-    pub const fn tx_payload_window_end_ms(&self) -> u64 {
-        self.tx_window_end_ms
-    }
-
-    /// Timestamp when the tx-delay window begins for this slot.
-    #[must_use]
-    pub const fn tx_delay_window_start_ms(&self) -> u64 {
-        self.tx_delay_window_start_ms
-    }
-
     /// If it is currently a valid moment to *start* a normal (non-tune) TX in this slot,
     /// return `now_ms`, otherwise return the next slot start.
     #[must_use]
@@ -274,7 +234,7 @@ impl TransmitSlot {
         if self.params().allowed_to_start_now && self.params().time_is_in_send_region {
             self.now_unix_ms
         } else {
-            self.next_slot_start_ms()
+            self.slot_end_ms
         }
     }
 
@@ -310,36 +270,10 @@ pub fn unix_time_ms() -> u64 {
 mod tests {
     use super::*;
 
-    struct Fake;
-    impl SubmodeLookup for Fake {
-        fn samples_for_one_symbol(_submode_id: Submode) -> f64 {
-            0.0
-        }
-        fn tone_spacing(_submode_id: Submode) -> f64 {
-            0.0
-        }
-        fn period_seconds(_submode_id: Submode) -> u64 {
-            15
-        }
-        fn start_delay_ms(_submode_id: Submode) -> u64 {
-            0
-        }
-        fn tx_duration(_submode_id: Submode) -> f64 {
-            12.6
-        }
-        fn compute_ratio(_submode_id: Submode) -> f64 {
-            1.0
-        }
-
-        fn late_threshold_multiplier(_submode_id: Submode) -> f64 {
-            1.0
-        }
-    }
-
     #[test]
     fn computes_slot_boundaries() {
         let cfg = TxTimingConfig::new(Duration::from_secs(1), Duration::from_secs(15));
-        let slot = compute_slot_with::<Fake>(Submode::Normal, 1_000, cfg);
+        let slot = compute_slot(Submode::Normal, 1_000, cfg);
         assert_eq!(slot.period_ms, 15_000);
         assert_eq!(slot.slot_start_ms, 0);
         assert_eq!(slot.slot_end_ms, 15_000);
@@ -352,7 +286,7 @@ mod tests {
         let cfg = TxTimingConfig::new(Duration::from_secs(2), Duration::from_secs(15));
 
         // 14.1s into slot: in tx-delay window, but outside payload window.
-        let slot = compute_slot_with::<Fake>(Submode::Normal, 14_100, cfg);
+        let slot = compute_slot(Submode::Normal, 14_100, cfg);
         let p = slot.params();
         assert!(p.in_tx_delay_window);
         assert!(!p.in_tx_payload_window);
@@ -363,7 +297,7 @@ mod tests {
     #[test]
     fn should_start_tx_now_respects_ptt_and_message_len() {
         let cfg = TxTimingConfig::new(Duration::from_secs(1), Duration::from_secs(15));
-        let slot = compute_slot_with::<Fake>(Submode::Normal, 1_000, cfg);
+        let slot = compute_slot(Submode::Normal, 1_000, cfg);
 
         assert!(slot.should_start_tx_now(false, 3));
         assert!(!slot.should_start_tx_now(true, 3));
@@ -373,37 +307,11 @@ mod tests {
     #[test]
     fn next_viable_start_moves_to_next_slot_when_too_late() {
         let cfg = TxTimingConfig::new(Duration::ZERO, Duration::from_secs(15));
-        // ratio=1.0 in Fake, so late threshold is 1.0 and this should still be viable.
-        let slot_ok = compute_slot_with::<Fake>(Submode::Normal, 14_000, cfg);
+        let slot_ok = compute_slot(Submode::Normal, 14_000, cfg);
         assert_eq!(slot_ok.next_viable_start_ms(), slot_ok.slot_end_ms);
 
-        struct Tight;
-        impl SubmodeLookup for Tight {
-            fn samples_for_one_symbol(_submode_id: Submode) -> f64 {
-                0.0
-            }
-            fn tone_spacing(_submode_id: Submode) -> f64 {
-                0.0
-            }
-            fn period_seconds(_submode_id: Submode) -> u64 {
-                10
-            }
-            fn start_delay_ms(_submode_id: Submode) -> u64 {
-                0
-            }
-            fn tx_duration(_submode_id: Submode) -> f64 {
-                4.0
-            }
-            fn compute_ratio(_submode_id: Submode) -> f64 {
-                0.4
-            }
-            fn late_threshold_multiplier(_submode_id: Submode) -> f64 {
-                1.0
-            }
-        }
-
-        let late_cfg = TxTimingConfig::new(Duration::ZERO, Duration::from_secs(10));
-        let late_slot = compute_slot_with::<Tight>(Submode::Fast, 6_000, late_cfg); // 60% into slot
+        let late_cfg = TxTimingConfig::new(Duration::ZERO, Duration::from_secs(15));
+        let late_slot = compute_slot(Submode::Normal, 6_000, late_cfg);
         assert!(late_slot.params().too_late_to_start);
         assert_eq!(late_slot.next_viable_start_ms(), late_slot.slot_end_ms);
     }

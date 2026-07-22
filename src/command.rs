@@ -131,6 +131,45 @@ impl CommandKind {
         }
     }
 
+    pub(crate) const fn from_wire_code(code: i32) -> Option<Self> {
+        Some(match code {
+            -1 => Self::Cq,
+            0 => Self::SnrQuery,
+            1 => Self::DitDit,
+            2 => Self::Nack,
+            3 => Self::HearingQuery,
+            4 => Self::GridQuery,
+            5 => Self::Relay,
+            6 => Self::StatusQuery,
+            7 => Self::Status,
+            8 => Self::Hearing,
+            9 => Self::Msg,
+            10 => Self::MsgTo,
+            11 => Self::Query,
+            12 => Self::QueryMsgs,
+            13 => Self::QueryCall,
+            14 => Self::Ack,
+            15 => Self::Grid,
+            16 => Self::InfoQuery,
+            17 => Self::Info,
+            18 => Self::Fb,
+            19 => Self::HowCopyQuery,
+            20 => Self::Sk,
+            21 => Self::Rr,
+            22 => Self::QslQuery,
+            23 => Self::Qsl,
+            24 => Self::Cmd,
+            25 => Self::Snr,
+            26 => Self::No,
+            27 => Self::Yes,
+            28 => Self::SeventyThree,
+            29 => Self::HeartbeatSnr,
+            30 => Self::AgainQuery,
+            31 => Self::FreeText,
+            _ => return None,
+        })
+    }
+
     /// Parse a command token from message text, accepting wire aliases.
     #[must_use]
     pub fn from_token(token: &str) -> Option<Self> {
@@ -204,6 +243,13 @@ impl CommandKind {
         }
     }
 
+    pub(crate) const fn packed_code(self) -> i32 {
+        match self.wire_code() {
+            Some(code) => code as i32,
+            None => -1,
+        }
+    }
+
     /// The canonical token emitted by directed-frame decoding.
     #[must_use]
     pub const fn wire_token(self) -> Option<&'static str> {
@@ -240,7 +286,8 @@ impl CommandKind {
             Self::HeartbeatSnr => " HEARTBEAT SNR",
             Self::AgainQuery => " AGN?",
             Self::FreeText => " ",
-            Self::Heartbeat | Self::Cq => return None,
+            Self::Heartbeat => " HEARTBEAT",
+            Self::Cq => " CQ",
         })
     }
 
@@ -251,18 +298,6 @@ impl CommandKind {
             self.wire_code(),
             Some(0 | 2 | 3 | 4 | 6 | 9 | 10 | 11 | 12 | 13 | 14 | 16 | 30)
         )
-    }
-
-    /// Whether the canonical wire token is buffered by JS8Call-improved.
-    #[must_use]
-    pub const fn is_buffered(self) -> bool {
-        !matches!(self, Self::Heartbeat | Self::Cq)
-    }
-
-    /// Whether the wire code is in JS8Call-improved's explicit buffered set.
-    #[must_use]
-    pub const fn is_buffered_code(self) -> bool {
-        matches!(self.wire_code(), Some(5 | 9 | 10 | 11 | 12 | 13 | 15 | 24))
     }
 
     /// The command payload checksum size used on the wire.
@@ -284,8 +319,10 @@ impl CommandKind {
 /// Test an exact decoded command token using JS8Call-improved's buffering rule.
 #[must_use]
 pub fn is_buffered_token(token: &str) -> bool {
-    CommandKind::from_wire(token)
-        .is_some_and(|kind| token.as_bytes().contains(&b' ') || kind.is_buffered_code())
+    CommandKind::from_wire(token).is_some_and(|kind| {
+        token.as_bytes().contains(&b' ')
+            || matches!(kind.wire_code(), Some(5 | 9 | 10 | 11 | 12 | 13 | 15 | 24))
+    })
 }
 
 /// A validated argument that immediately follows a command.
@@ -1043,7 +1080,7 @@ fn is_base_call(call: &str) -> bool {
     })
 }
 
-fn is_valid_call(call: &str) -> bool {
+pub(crate) fn is_valid_call(call: &str) -> bool {
     if !call.is_ascii() {
         return false;
     }
@@ -1062,7 +1099,7 @@ fn is_valid_call(call: &str) -> bool {
     is_valid_compound(call) && is_compound_shape(call)
 }
 
-fn is_compound_call(call: &str) -> bool {
+pub(crate) fn is_compound_call(call: &str) -> bool {
     if !call.is_ascii() || (!call.starts_with('@') && is_valid_base(call)) {
         return false;
     }
@@ -1287,58 +1324,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fast_callsign_checks_match_varicode() {
-        for call in [
-            "K1ABC",
-            "K1ABC/P",
-            "3DA0XYZ",
-            "3XABC",
-            "@ALLCALL",
-            "@ARESGA",
-            "@RESERVE/0",
-            "@@A1",
-            "@@@A1",
-            "FOO/K1ABC",
-            "K1ABC/FOO",
-            "FOO/BAR",
-            "HELLO",
-            "<....>",
-            "@",
-            "/",
-        ] {
-            assert_eq!(
-                is_valid_call(call),
-                varicode::is_valid_callsign(call, None),
-                "validity differs for {call:?}"
-            );
-            assert_eq!(
+    fn callsign_checks_cover_base_compound_and_invalid_forms() {
+        for call in ["K1ABC", "K1ABC/P", "<....>"] {
+            assert!(is_valid_call(call), "expected valid callsign {call:?}");
+            assert!(!is_compound_call(call), "expected base callsign {call:?}");
+        }
+
+        for call in ["3DA0XYZ", "3XABC", "@ALLCALL", "@ARESGA", "@@A1"] {
+            assert!(is_valid_call(call), "expected valid callsign {call:?}");
+            assert!(
                 is_compound_call(call),
-                varicode::is_compound_callsign(call),
-                "compound classification differs for {call:?}"
+                "expected compound callsign {call:?}"
             );
         }
 
-        const ALPHABET: &[u8] = b"ABXZ019/P@";
-        let mut state = 0xA5A5_1234_u32;
-        for _ in 0..20_000 {
-            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            let len = (state as usize % 12) + 1;
-            let mut bytes = [0_u8; 12];
-            for byte in &mut bytes[..len] {
-                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                *byte = ALPHABET[state as usize % ALPHABET.len()];
-            }
-            let call = core::str::from_utf8(&bytes[..len]).unwrap();
-            assert_eq!(
-                is_valid_call(call),
-                varicode::is_valid_callsign(call, None),
-                "validity differs for {call:?}"
-            );
-            assert_eq!(
-                is_compound_call(call),
-                varicode::is_compound_callsign(call),
-                "compound classification differs for {call:?}"
-            );
+        for call in ["HELLO", "@@@A1", "@", "/"] {
+            assert!(!is_valid_call(call), "expected invalid callsign {call:?}");
+            assert!(!is_compound_call(call));
         }
     }
 

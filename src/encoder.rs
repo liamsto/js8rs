@@ -7,16 +7,18 @@
 
 use crate::{
     codec::EncodeError,
-    internal::{costas, local_routines::PARITY_MATRIX},
+    internal::{
+        costas,
+        crc12::crc12,
+        local_routines::{ALPHABET, PARITY_MATRIX},
+    },
     protocol::Submode,
-    submode,
 };
 
 pub const COSTAS_LEN: usize = 7;
 pub const COSTAS_COUNT: usize = 3;
 /// Number of channel symbols in one encoded frame.
 pub const TONES_PER_FRAME: usize = 79;
-pub const ALPHABET: &[u8; 64] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-+";
 const INVALID_WORD: u8 = 0xFF;
 
 const fn build_alphabet_words() -> [u8; 256] {
@@ -38,11 +40,6 @@ pub const fn alphabet_word(value: u8) -> Result<u8, EncodeError> {
     } else {
         Ok(w)
     }
-}
-
-/// Equivalent to: `boost::augmented_crc<12, 0xc06>(data, len) ^ 42`.
-pub const fn crc12(data: &[u8]) -> u16 {
-    crate::internal::crc12::crc12(data)
 }
 
 /// Encode a 12-character JS8 message into 79 tones.
@@ -102,9 +99,7 @@ pub fn encode(
     submode: Submode,
     message: &[u8],
 ) -> Result<[u8; TONES_PER_FRAME], EncodeError> {
-    let data = submode::data(submode);
-    let ctype = data.costas_type();
-    let c = costas::for_type(ctype);
+    let c = costas::for_type(submode.costas_type());
 
     let mut tones = [0u8; TONES_PER_FRAME];
     encode_with_costas(typ, c, message, &mut tones)?;

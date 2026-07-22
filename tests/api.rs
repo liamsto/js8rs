@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
 
 use js8rs::codec::{BuildFramesOptions, build_frames, parse_compound, parse_directed, parse_frame};
-use js8rs::protocol::{FrameFlags, FrameType, Submode, submode_from_i32};
+use js8rs::protocol::{FrameFlags, FrameType, Submode, SubmodeParseError};
 
 fn data_payload_word_count(text: &str, submode: Submode) -> usize {
     let built = build_frames(&BuildFramesOptions::new(text, submode).with_station("K1ABC", "EM73"));
@@ -71,8 +71,7 @@ fn normal_mode_uses_legacy_data_policy() {
 
 #[test]
 fn invalid_submode_conversion_is_non_panicking() {
-    let err = submode_from_i32(3).expect_err("3 is not a valid JS8 submode");
-    assert_eq!(err.value, 3);
+    assert_eq!(Submode::try_from(3), Err(SubmodeParseError { value: 3 }));
 }
 
 #[test]

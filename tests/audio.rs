@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use js8rs::protocol::{DecodeModes, Submode, decode_nmax_frames};
+use js8rs::protocol::{DecodeModes, Submode};
 use js8rs::rx::{DecodeConfig, Decoder, Event, SAMPLE_BUFFER_SIZE};
 
 fn parse_fixture_name(path: &Path) -> Option<(Submode, usize, usize)> {
@@ -42,7 +42,7 @@ fn decode_count_for(
     submode: Submode,
     depth: usize,
 ) -> usize {
-    let nmax = decode_nmax_frames(submode).max(1usize);
+    let nmax = submode.samples_per_period().max(1usize);
     let kin = samples.len().min(SAMPLE_BUFFER_SIZE).min(nmax);
     let mut ring = vec![0i16; SAMPLE_BUFFER_SIZE];
     ring[..kin].copy_from_slice(&samples[..kin]);

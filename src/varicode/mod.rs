@@ -7,8 +7,11 @@
 
 #[cfg(test)]
 use crate::protocol::FrameType;
-use crate::protocol::{FrameFlags, Submode};
-use phf::{phf_map, phf_set};
+use crate::{
+    command::{CommandKind, is_buffered_token, is_compound_call, is_valid_call},
+    protocol::{FrameFlags, Submode},
+};
+use phf::phf_map;
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -49,73 +52,7 @@ const fn build_alphabet72_index() -> [u8; 256] {
 
 const ALPHABET72_INDEX: [u8; 256] = build_alphabet72_index();
 pub const GRID_PATTERN: &str = r"((?<grid>[A-X]{2}[0-9]{2}(?:[A-X]{2}(?:[0-9]{2})?)*)+)";
-pub const BASE_CALLSIGN_PATTERN: &str = r"((?<callsign>\b(?<base>([0-9A-Z])?([0-9A-Z])([0-9])([A-Z])?([A-Z])?([A-Z])?)(?<portable>[/][P])?\b))";
 pub const COMPOUND_CALLSIGN_PATTERN: &str = r"((?<callsign>(?:[@]?|\b)(?<extended>[A-Z0-9\/@][A-Z0-9\/]{0,2}[\/]?[A-Z0-9\/]{0,3}[\/]?[A-Z0-9\/]{0,3})\b))";
-/// Directed command table, represented as an immutable PHF map.
-pub static DIRECTED_CMDS: phf::Map<&'static str, i32> = phf_map! {
-    " HEARTBEAT"     => -1,
-    " HB"            => -1,
-    " CQ"            => -1,
-    " SNR?"          =>  0,
-    "?"              =>  0,
-    " DIT DIT"       =>  1,
-    " HEARING?"      =>  3,
-    " GRID?"         =>  4,
-    ">"              =>  5,
-    " STATUS?"       =>  6,
-    " STATUS"        =>  7,
-    " HEARING"       =>  8,
-    " MSG"           =>  9,
-    " MSG TO:"       => 10,
-    " QUERY"         => 11,
-    " QUERY MSGS"    => 12,
-    " QUERY MSGS?"   => 12,
-    " QUERY CALL"    => 13,
-    " GRID"          => 15,
-    " INFO?"         => 16,
-    " INFO"          => 17,
-    " FB"            => 18,
-    " HW CPY?"       => 19,
-    " SK"            => 20,
-    " RR"            => 21,
-    " QSL?"          => 22,
-    " QSL"           => 23,
-    " CMD"           => 24,
-    " SNR"           => 25,
-    " NO"            => 26,
-    " YES"           => 27,
-    " 73"            => 28,
-    " NACK"          =>  2,
-    " ACK"           => 14,
-    " HEARTBEAT SNR" => 29,
-    " AGN?"          => 30,
-    "  "             => 31, // weird artifact
-    " "              => 31, // send freetext
-};
-
-// Commands allowed to be processed
-pub static ALLOWED_CMDS: phf::Set<i32> = phf_set! {
-    -1_i32, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-    17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
-};
-
-// Commands that should be buffered
-pub static BUFFERED_CMDS: phf::Set<i32> = phf_set! { 5_i32, 9, 10, 11, 12, 13, 15, 24 };
-
-// Commands that may include an SNR value
-pub static SNR_CMDS: phf::Set<i32> = phf_set! { 25_i32, 29 };
-
-// Commands that are checksummed and their corresponding crc size
-pub static CHECKSUM_CMDS: phf::Map<i32, u8> = phf_map! {
-     5_i32 => 16_u8,
-     9 => 16,
-    10 => 16,
-    11 => 16,
-    12 => 16,
-    13 => 16,
-    15 =>  0,
-    24 => 16,
-};
 
 // Full regex strings corresponding to the QRegularExpression constructions
 // Unforunately, concat! cannot handle consts, so all the prior consts have to be inlined.
@@ -446,7 +383,7 @@ pub fn parse_callsigns(input: &str) -> Vec<String> {
         };
 
         let callsign = m.as_str().trim().to_string();
-        if !is_valid_callsign(&callsign, None) {
+        if !is_valid_call(&callsign) {
             continue;
         }
 
@@ -569,16 +506,6 @@ pub fn bits_to_int(value: &[bool]) -> u64 {
     let mut v: u64 = 0;
     for &bit in value {
         v = (v << 1) + u64::from(bit);
-    }
-    v
-}
-
-// Equivalent of bitsToInt(ConstIterator start, int n)
-pub fn bits_to_int_n(start: &[bool], n: usize) -> u64 {
-    let mut v: u64 = 0;
-    for bit in &start[..n] {
-        let bit = u64::from(*bit);
-        v = (v << 1) + bit;
     }
     v
 }
@@ -969,70 +896,11 @@ pub fn unpack_grid(value: u16) -> String {
     String::from_utf8(grid.to_vec()).expect("grid alphabet is ASCII")
 }
 
-static ALNUM_SEQ_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[0-9][A-Z]|[A-Z][0-9]").unwrap());
-
-static BASE_CALLSIGN_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(BASE_CALLSIGN_PATTERN).unwrap());
-
-static COMPOUND_CALLSIGN_RE_ANCHORED: LazyLock<Regex> = LazyLock::new(|| {
-    let pat = format!("^{COMPOUND_CALLSIGN_PATTERN}");
-    Regex::new(&pat).unwrap()
-});
-
 static GRID_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(GRID_PATTERN).unwrap());
 
 static HEARTBEAT_REX: LazyLock<Regex> = LazyLock::new(|| Regex::new(HEARTBEAT_RE).unwrap());
 
 static COMPOUND_REX: LazyLock<Regex> = LazyLock::new(|| Regex::new(COMPOUND_RE).unwrap());
-
-fn directed_cmd_code(cmd: &str) -> Option<i32> {
-    DIRECTED_CMDS.get(cmd).copied()
-}
-
-// QMap::key results for command codes -1 through 31.
-const CMD_KEYS: [&str; 33] = [
-    " CQ",
-    " SNR?",
-    " DIT DIT",
-    " NACK",
-    " HEARING?",
-    " GRID?",
-    ">",
-    " STATUS?",
-    " STATUS",
-    " HEARING",
-    " MSG",
-    " MSG TO:",
-    " QUERY",
-    " QUERY MSGS",
-    " QUERY CALL",
-    " ACK",
-    " GRID",
-    " INFO?",
-    " INFO",
-    " FB",
-    " HW CPY?",
-    " SK",
-    " RR",
-    " QSL?",
-    " QSL",
-    " CMD",
-    " SNR",
-    " NO",
-    " YES",
-    " 73",
-    " HEARTBEAT SNR",
-    " AGN?",
-    " ",
-];
-
-fn directed_cmd_key(code: i32) -> &'static str {
-    code.checked_add(1)
-        .and_then(|index| CMD_KEYS.get(index as usize))
-        .copied()
-        .unwrap_or("")
-}
 
 fn cqs_key_by_value(v: &str, default_key: u32) -> u32 {
     let mut best: Option<u32> = None;
@@ -1078,12 +946,11 @@ pub fn pack_num(num: &str, ok_out: Option<&mut bool>) -> u8 {
 
 /// Pack a reduced fidelity command and a number into the extra bits provided between `nbasegrid` and `nmaxgrid`.
 pub fn pack_cmd(cmd: u8, num: u8, packed_num_out: Option<&mut bool>) -> u8 {
-    let code = i32::from(cmd);
-    let cmd_str = directed_cmd_key(code);
+    let kind = CommandKind::from_wire_code(i32::from(cmd));
 
-    if is_snr_command(cmd_str) {
+    if kind.is_some_and(CommandKind::has_snr) {
         // [1][X][6] where X=0 => SNR, X=1 => HEARTBEAT SNR
-        let mut value: u8 = ((1u8 << 1) | u8::from(cmd_str == " HEARTBEAT SNR")) << 6;
+        let mut value: u8 = ((1u8 << 1) | u8::from(kind == Some(CommandKind::HeartbeatSnr))) << 6;
         value = value.wrapping_add(num & ((1u8 << 6) - 1));
         if let Some(p) = packed_num_out {
             *p = true;
@@ -1104,9 +971,9 @@ pub fn unpack_cmd(value: u8, num_out: Option<&mut u8>) -> u8 {
         }
 
         if (value & (1u8 << 6)) != 0 {
-            DIRECTED_CMDS.get(" HEARTBEAT SNR").copied().unwrap_or(29) as u8
+            CommandKind::HeartbeatSnr as u8
         } else {
-            DIRECTED_CMDS.get(" SNR").copied().unwrap_or(25) as u8
+            CommandKind::Snr as u8
         }
     } else {
         if let Some(pn) = num_out {
@@ -1114,104 +981,6 @@ pub fn unpack_cmd(value: u8, num_out: Option<&mut u8>) -> u8 {
         }
         value & ((1u8 << 7) - 1)
     }
-}
-
-pub fn is_snr_command(cmd: &str) -> bool {
-    directed_cmd_code(cmd).is_some_and(|c| SNR_CMDS.contains(&c))
-}
-
-pub fn is_command_allowed(cmd: &str) -> bool {
-    directed_cmd_code(cmd).is_some_and(|c| ALLOWED_CMDS.contains(&c))
-}
-
-pub fn is_command_buffered(cmd: &str) -> bool {
-    directed_cmd_code(cmd).is_some_and(|c| cmd.contains(' ') || BUFFERED_CMDS.contains(&c))
-}
-
-pub fn is_command_checksumed(cmd: &str) -> u8 {
-    let Some(code) = directed_cmd_code(cmd) else {
-        return 0;
-    };
-    CHECKSUM_CMDS.get(&code).copied().unwrap_or(0)
-}
-
-pub fn is_valid_compound_callsign(callsign: &str) -> bool {
-    let slash_count = callsign.as_bytes().iter().filter(|&&b| b == b'/').count();
-    if callsign.len().saturating_sub(slash_count) > 9 {
-        return false;
-    }
-
-    if let Some(idx) = callsign.find('/') {
-        let prefix = &callsign[..idx];
-        return !BASECALLS.contains_key(prefix);
-    }
-
-    if callsign.starts_with('@') {
-        return true;
-    }
-
-    if callsign.len() > 2 && ALNUM_SEQ_RE.is_match(callsign).unwrap_or(false) {
-        return true;
-    }
-
-    false
-}
-
-pub fn is_valid_callsign(callsign: &str, is_compound_out: Option<&mut bool>) -> bool {
-    if BASECALLS.contains_key(callsign) {
-        if let Some(p) = is_compound_out {
-            *p = false;
-        }
-        return true;
-    }
-
-    if let Ok(Some(m)) = BASE_CALLSIGN_RE.find(callsign)
-        && m.start() == 0
-        && m.end() == callsign.len()
-    {
-        if let Some(p) = is_compound_out {
-            *p = false;
-        }
-        return callsign.len() > 2 && ALNUM_SEQ_RE.is_match(callsign).unwrap_or(false);
-    }
-
-    if let Ok(Some(m)) = COMPOUND_CALLSIGN_RE_ANCHORED.find(callsign)
-        && m.start() == 0
-        && m.end() == callsign.len()
-    {
-        let valid = is_valid_compound_callsign(m.as_str());
-        if let Some(p) = is_compound_out {
-            *p = valid;
-        }
-        return valid;
-    }
-
-    if let Some(p) = is_compound_out {
-        *p = false;
-    }
-    false
-}
-
-pub fn is_compound_callsign(callsign: &str) -> bool {
-    if BASECALLS.contains_key(callsign) && !callsign.starts_with('@') {
-        return false;
-    }
-
-    if let Ok(Some(m)) = BASE_CALLSIGN_RE.find(callsign)
-        && m.start() == 0
-        && m.end() == callsign.len()
-    {
-        return false;
-    }
-
-    let Ok(Some(m)) = COMPOUND_CALLSIGN_RE_ANCHORED.find(callsign) else {
-        return false;
-    };
-    if m.start() != 0 || m.end() != callsign.len() {
-        return false;
-    }
-
-    is_valid_compound_callsign(m.as_str())
 }
 
 pub fn pack_heartbeat_message(text: &str, callsign: &str, n_out: Option<&mut usize>) -> String {
@@ -1328,12 +1097,10 @@ pub fn pack_compound_message(text: &str, n_out: Option<&mut usize>) -> String {
     let mut extra: u16 = NMAXGRID;
 
     if !cmd.is_empty() {
-        if let Some(code) = directed_cmd_code(cmd)
-            && is_command_allowed(cmd)
-        {
+        if let Some(kind) = CommandKind::from_wire(cmd) {
             let mut packed_num_flag = false;
             let inum = pack_num(num_str, None);
-            let packed_cmd = pack_cmd(code as u8, inum, Some(&mut packed_num_flag));
+            let packed_cmd = pack_cmd(kind.packed_code() as u8, inum, Some(&mut packed_num_flag));
             extra = NUSERGRID.wrapping_add(u16::from(packed_cmd));
             ty = 2u8;
         }
@@ -1370,11 +1137,12 @@ pub fn unpack_compound_message(
     } else if (NUSERGRID..NMAXGRID).contains(&extra) {
         let mut num: u8 = 0;
         let cmd = unpack_cmd((extra - NUSERGRID) as u8, Some(&mut num));
-        let cmd_str = directed_cmd_key(i32::from(cmd));
+        let kind = CommandKind::from_wire_code(i32::from(cmd));
+        let cmd_str = kind.and_then(CommandKind::wire_token).unwrap_or("");
 
         unpacked.push(cmd_str.to_string());
 
-        if is_snr_command(cmd_str) {
+        if kind.is_some_and(CommandKind::has_snr) {
             unpacked.push(format_snr(i32::from(num) - 31));
         }
     }
@@ -1490,7 +1258,7 @@ pub fn pack_directed_message(
     };
 
     let mut from = mycall.to_string();
-    let is_from_compound = is_compound_callsign(&from);
+    let is_from_compound = is_compound_call(&from);
     if is_from_compound {
         from = "<....>".to_string();
     }
@@ -1508,8 +1276,7 @@ pub fn pack_directed_message(
     }
 
     // ensure we have a valid callsign
-    let mut is_to_compound = false;
-    let valid_to_callsign = (to != mycall) && is_valid_callsign(&to, Some(&mut is_to_compound));
+    let valid_to_callsign = to != mycall && is_valid_call(&to);
     if !valid_to_callsign {
         if let Some(n) = n_out {
             *n = 0;
@@ -1520,6 +1287,7 @@ pub fn pack_directed_message(
     if let Some(p) = to_out {
         *p = to.clone();
     }
+    let is_to_compound = valid_to_callsign && is_compound_call(&to);
     if let Some(p) = to_compound_out {
         *p = is_to_compound;
     }
@@ -1530,7 +1298,7 @@ pub fn pack_directed_message(
     }
 
     // validate command (allow trimmed version as well)
-    if !is_command_allowed(&cmd) && !is_command_allowed(cmd.trim()) {
+    if CommandKind::from_wire(&cmd).is_none() && CommandKind::from_wire(cmd.trim()).is_none() {
         if let Some(n) = n_out {
             *n = 0;
         }
@@ -1560,14 +1328,14 @@ pub fn pack_directed_message(
     let mut cmd_out_s = String::new();
     let mut packed_cmd: u8 = 0;
 
-    if let Some(code) = directed_cmd_code(&cmd) {
+    if let Some(kind) = CommandKind::from_wire(&cmd) {
         cmd_out_s = cmd.clone();
-        packed_cmd = code as u8;
+        packed_cmd = kind.packed_code() as u8;
     }
     let trimmed = cmd.trim();
-    if let Some(code) = directed_cmd_code(trimmed) {
+    if let Some(kind) = CommandKind::from_wire(trimmed) {
         cmd_out_s = trimmed.to_string();
-        packed_cmd = code as u8;
+        packed_cmd = kind.packed_code() as u8;
     }
 
     let packed_flag: u8 = FRAME_DIRECTED;
@@ -1617,7 +1385,11 @@ pub fn unpack_directed_message(text: &str, ty_out: Option<&mut u8>) -> Vec<Strin
 
     let from = unpack_callsign(packed_from, portable_from);
     let to = unpack_callsign(packed_to, portable_to);
-    let cmd = directed_cmd_key(i32::from(packed_cmd % 32)).to_string();
+    let kind = CommandKind::from_wire_code(i32::from(packed_cmd % 32));
+    let cmd = kind
+        .and_then(CommandKind::wire_token)
+        .unwrap_or("")
+        .to_string();
 
     out.push(from);
     out.push(to);
@@ -1625,7 +1397,7 @@ pub fn unpack_directed_message(text: &str, ty_out: Option<&mut u8>) -> Vec<Strin
 
     if extra != 0 {
         let v = i32::from(extra) - 31;
-        if is_snr_command(&cmd) {
+        if kind.is_some_and(CommandKind::has_snr) {
             out.push(format_snr(v));
         } else {
             out.push(v.to_string());
@@ -1699,8 +1471,8 @@ pub fn pack_huff_message(input: &str, prefix: &[bool], n_out: Option<&mut usize>
         }
     }
 
-    let value: u64 = bits_to_int_n(&frame_bits[..64], 64);
-    let rem: u8 = bits_to_int_n(&frame_bits[64..72], 8) as u8;
+    let value = bits_to_int(&frame_bits[..64]);
+    let rem = bits_to_int(&frame_bits[64..72]) as u8;
     frame = pack72bits(value, rem);
 
     if let Some(n) = n_out {
@@ -2080,7 +1852,7 @@ pub fn build_message_frames(
                 // ALLOW_SEND_COMPOUND_DIRECTED true-path
                 let mut should_use_standard_frame = true;
 
-                if is_compound_callsign(mycall) || dir_to_compound {
+                if is_compound_call(mycall) || dir_to_compound {
                     // Send a DE compound frame first
                     let de_compound_message = format!("`{mycall} {mygrid}");
                     let de_compound_frame = pack_compound_message(&de_compound_message, None);
@@ -2105,7 +1877,7 @@ pub fn build_message_frames(
                 line = mid_bytes(&line, n);
 
                 // buffered command checksum handling
-                if is_command_buffered(&dir_cmd) && !line.is_empty() {
+                if is_buffered_token(&dir_cmd) && !line.is_empty() {
                     line = lstrip(&line);
 
                     let skip_aprs_checksum = dir_to.eq_ignore_ascii_case("@APRSIS")
@@ -2113,7 +1885,7 @@ pub fn build_message_frames(
                     let checksum_size = if skip_aprs_checksum {
                         0
                     } else {
-                        is_command_checksumed(&dir_cmd)
+                        CommandKind::from_wire(&dir_cmd).map_or(0, CommandKind::checksum_bits)
                     };
 
                     if checksum_size == 32 {
@@ -2440,28 +2212,27 @@ mod tests {
 
     #[test]
     fn command_classification_matches_expected_tables() {
-        assert!(is_command_allowed(" MSG"));
-        assert!(is_command_buffered(" MSG"));
-        assert_eq!(is_command_checksumed(" MSG"), 16);
+        assert_eq!(CommandKind::from_wire(" MSG"), Some(CommandKind::Msg));
+        assert!(is_buffered_token(" MSG"));
+        assert_eq!(CommandKind::Msg.checksum_bits(), 16);
 
-        assert!(is_command_allowed(" GRID"));
-        assert!(is_command_buffered(" GRID"));
-        assert_eq!(is_command_checksumed(" GRID"), 0);
+        assert_eq!(CommandKind::from_wire(" GRID"), Some(CommandKind::Grid));
+        assert!(is_buffered_token(" GRID"));
+        assert_eq!(CommandKind::Grid.checksum_bits(), 0);
 
-        assert!(!is_command_allowed(" NOT_A_CMD"));
-        assert!(!is_command_buffered(" NOT_A_CMD"));
-        assert_eq!(is_command_checksumed(" NOT_A_CMD"), 0);
+        assert_eq!(CommandKind::from_wire(" NOT_A_CMD"), None);
+        assert!(!is_buffered_token(" NOT_A_CMD"));
 
         for code in -1..=31 {
-            let expected = DIRECTED_CMDS
-                .entries()
-                .filter_map(|(key, value)| (*value == code).then_some(*key))
-                .min()
-                .unwrap();
-            assert_eq!(directed_cmd_key(code), expected, "command code {code}");
+            let kind = CommandKind::from_wire_code(code).expect("known command code");
+            assert_eq!(kind.packed_code(), code, "command code {code}");
+            assert!(
+                kind.wire_token()
+                    .is_some_and(|token| CommandKind::from_wire(token).is_some())
+            );
         }
         for code in [i32::MIN, -2, 32, i32::MAX] {
-            assert_eq!(directed_cmd_key(code), "");
+            assert_eq!(CommandKind::from_wire_code(code), None);
         }
 
         for text in ["", "C", "CQ", "CQX", "CQ CQ CQ EM73", "xCQ", "HB", "HBX"] {

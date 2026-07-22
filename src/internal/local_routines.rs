@@ -7,30 +7,7 @@
 
 use crate::internal::crc12::crc12;
 
-const ALPHABET: &[u8; 64] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-+";
-const INVALID_WORD: u8 = 0xFF;
-
-const fn make_alphabet_words() -> [u8; 256] {
-    let mut words = [INVALID_WORD; 256];
-    let mut i = 0usize;
-    while i < 64 {
-        let c = ALPHABET[i] as usize;
-        words[c] = i as u8;
-        i += 1;
-    }
-    words
-}
-
-const ALPHABET_WORDS: [u8; 256] = make_alphabet_words();
-
-// Sanity checks for table bounds (C++ static_assert equivalents).
-const _: () = {
-    assert!(ALPHABET_WORDS[b'0' as usize] == 0);
-    assert!(ALPHABET_WORDS[b'A' as usize] == 10);
-    assert!(ALPHABET_WORDS[b'a' as usize] == 36);
-    assert!(ALPHABET_WORDS[b'-' as usize] == 62);
-    assert!(ALPHABET_WORDS[b'+' as usize] == 63);
-};
+pub const ALPHABET: &[u8; 64] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-+";
 
 // decoded_bits are 0/1 values (i8) representing KK bits.
 pub fn check_crc12(decoded_bits: &[i8]) -> bool {

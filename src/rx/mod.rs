@@ -4,7 +4,7 @@
 //! Synchronous receive-side detection and decoding.
 
 use crate::codec::DecodedFrame;
-use crate::protocol::{DecodeModes, Submode, decode_nmax_frames};
+use crate::protocol::{DecodeModes, Submode};
 
 /// Buffered directed-message reassembly.
 pub mod reassembly;
@@ -268,8 +268,8 @@ impl DecodeConfig {
             ..crate::internal::commons::DecodeParams::default()
         };
 
-        let set_window = |submode, position: &mut usize, size: &mut usize| {
-            (*position, *size) = window_from_kin(valid_samples, decode_nmax_frames(submode));
+        let set_window = |submode: Submode, position: &mut usize, size: &mut usize| {
+            (*position, *size) = window_from_kin(valid_samples, submode.samples_per_period());
         };
         if self.modes.contains(DecodeModes::NORMAL) {
             set_window(Submode::Normal, &mut params.kpos_a, &mut params.ksz_a);

@@ -8,11 +8,10 @@
 //! Reassembly of buffered directed commands across decoded frames.
 
 use crate::codec::DecodedFrame;
+use crate::command::{CommandKind, is_buffered_token};
 use crate::protocol::{FrameFlags, Submode};
 use crate::rx::Decoded;
-use crate::varicode::{
-    checksum16_valid, checksum32_valid, is_command_buffered, is_command_checksumed,
-};
+use crate::varicode::{checksum16_valid, checksum32_valid};
 use std::collections::HashMap;
 
 /// Key separating independent buffered message streams.
@@ -152,7 +151,7 @@ impl MessageBufferAssembler {
         let command = parsed.directed[2].clone();
 
         let has_placeholder_call = from == "<....>" || to == "<....>";
-        let buffered = is_command_buffered(&command);
+        let buffered = is_buffered_token(&command);
 
         if buffered && (!is_last || has_placeholder_call) {
             self.buffers.insert(
@@ -233,11 +232,11 @@ fn rstrip_spaces(input: &str) -> String {
 }
 
 fn finalize_buffered_payload(command: &str, payload: String) -> (String, Option<BufferedChecksum>) {
-    if !is_command_buffered(command) {
+    if !is_buffered_token(command) {
         return (payload, None);
     }
 
-    let checksum_size = is_command_checksumed(command);
+    let checksum_size = CommandKind::from_wire(command).map_or(0, CommandKind::checksum_bits);
     if checksum_size == 0 {
         return (payload, None);
     }

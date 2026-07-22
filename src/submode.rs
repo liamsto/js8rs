@@ -5,41 +5,12 @@
 //
 // Ported JS8 submode parameter queries to Rust.
 
-use core::fmt;
 use std::fmt::Display;
 
 use crate::{
     internal::{commons, costas},
     protocol::Submode,
 };
-
-/// Error returned on invalid submode usage (C++: `JS8::Submode::error`).
-#[derive(Debug, Clone)]
-pub struct Error {
-    what: String,
-}
-
-impl Error {
-    #[inline]
-    pub fn new<S: Into<String>>(what: S) -> Self {
-        Self { what: what.into() }
-    }
-
-    #[inline]
-    pub fn invalid_submode(submode: i32) -> Self {
-        Self::new(format!("Invalid JS8 submode {submode}"))
-    }
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.what)
-    }
-}
-
-impl std::error::Error for Error {}
-
-pub type Result<T> = core::result::Result<T, Error>;
 
 #[inline]
 const fn floor_f64(v: f64) -> i32 {
@@ -126,10 +97,6 @@ impl Data {
             10,
         )
     }
-
-    pub const fn costas_type(&self) -> costas::Type {
-        self.costas
-    }
 }
 
 pub const NORMAL: Data = Data::new_default_rx_threshold(
@@ -193,23 +160,109 @@ impl Display for Submode {
     }
 }
 
-impl TryFrom<i32> for Submode {
-    type Error = Error;
+impl Submode {
+    /// Returns the uppercase submode name.
+    pub const fn name(self) -> &'static str {
+        data(self).name
+    }
 
-    fn try_from(value: i32) -> Result<Self> {
-        match value {
-            0 => Ok(Self::Normal),
-            1 => Ok(Self::Fast),
-            2 => Ok(Self::Turbo),
-            4 => Ok(Self::Slow),
-            8 => Ok(Self::Ultra),
-            _ => Err(Error::invalid_submode(value)),
+    /// Returns the occupied bandwidth in hertz.
+    pub const fn bandwidth_hz(self) -> u64 {
+        data(self).bandwidth
+    }
+
+    /// Returns the slot period in seconds.
+    pub const fn period_seconds(self) -> u64 {
+        data(self).period_s
+    }
+
+    /// Returns 12 kHz samples per transmitted symbol.
+    pub const fn samples_for_one_symbol(self) -> u64 {
+        data(self).samples_for_one_symbol
+    }
+
+    /// Returns samples used to transmit all symbols in a frame.
+    pub const fn samples_for_symbols(self) -> u64 {
+        data(self).samples_for_symbols
+    }
+
+    /// Returns samples needed for a complete receive capture.
+    pub const fn samples_needed(self) -> u64 {
+        data(self).samples_needed
+    }
+
+    /// Returns decoder samples in one submode period.
+    pub const fn samples_per_period(self) -> usize {
+        data(self).samples_per_period as usize
+    }
+
+    /// Returns the nominal receive SNR threshold in decibels.
+    pub const fn rx_snr_threshold(self) -> i32 {
+        data(self).rx_snr_threshold
+    }
+
+    /// Returns the decoder synchronization threshold.
+    pub const fn rx_threshold(self) -> i32 {
+        data(self).rx_threshold
+    }
+
+    /// Returns the nominal slot start delay in milliseconds.
+    pub const fn start_delay_ms(self) -> u64 {
+        data(self).start_delay_ms
+    }
+
+    /// Returns tone spacing in hertz.
+    pub const fn tone_spacing(self) -> f64 {
+        data(self).tone_spacing
+    }
+
+    /// Returns the complete waveform duration in seconds.
+    pub const fn tx_duration(self) -> f64 {
+        data(self).tx_duration
+    }
+
+    /// Returns the late-start threshold scale.
+    pub const fn late_threshold_multiplier(self) -> f64 {
+        match self {
+            Self::Ultra | Self::Turbo => 0.5,
+            Self::Fast => 0.75,
+            Self::Normal | Self::Slow => 1.0,
         }
+    }
+
+    /// Returns the transmit-to-slot duration ratio.
+    pub const fn compute_ratio(self) -> f64 {
+        let data = data(self);
+        let period = data.period_s as f64;
+        (period - data.data_duration) / period
+    }
+
+    /// Returns the receive cycle containing sample position `k`.
+    pub const fn compute_cycle_for_decode(self, k: usize) -> usize {
+        let max_frames = commons::JS8_RX_SAMPLE_SIZE;
+        let cycle_frames = self.samples_per_period();
+
+        (k / cycle_frames) % (max_frames / cycle_frames)
+    }
+
+    /// Returns the receive cycle after applying an alternate sample offset.
+    pub const fn compute_alt_cycle_for_decode(self, k: usize, offset_frames: usize) -> usize {
+        let max_frames = commons::JS8_RX_SAMPLE_SIZE;
+        let alt_k = if k >= offset_frames {
+            k - offset_frames
+        } else {
+            max_frames - ((offset_frames - k) % max_frames)
+        };
+
+        self.compute_cycle_for_decode(alt_k % max_frames)
+    }
+
+    pub(crate) const fn costas_type(self) -> costas::Type {
+        data(self).costas
     }
 }
 
-#[inline]
-pub const fn data(submode: Submode) -> &'static Data {
+const fn data(submode: Submode) -> &'static Data {
     match submode {
         Submode::Normal => &NORMAL,
         Submode::Fast => &FAST,
@@ -219,106 +272,9 @@ pub const fn data(submode: Submode) -> &'static Data {
     }
 }
 
-/// Name of the submode, in all uppercase letters.
-pub const fn name(submode: Submode) -> &'static str {
-    data(submode).name
-}
-
-pub const fn bandwidth(submode: Submode) -> u64 {
-    data(submode).bandwidth
-}
-
-/// Period from one transmission start to the next, in seconds.
-pub const fn period_seconds(submode: Submode) -> u64 {
-    data(submode).period_s
-}
-
-/// Audio samples (at 12000 samples/sec) per symbol.
-pub const fn samples_for_one_symbol(submode: Submode) -> u64 {
-    data(submode).samples_for_one_symbol
-}
-
-/// Samples used to transmit the symbols of one period.
-pub const fn samples_for_symbols(submode: Submode) -> u64 {
-    data(submode).samples_for_symbols
-}
-
-/// Samples needed to capture entire TX duration, including start delay, plus another 500 ms.
-pub const fn samples_needed(submode: Submode) -> u64 {
-    data(submode).samples_needed
-}
-
-/// Samples per period at 12000 samples/sec.
-pub const fn samples_per_period(submode: Submode) -> u64 {
-    data(submode).samples_per_period
-}
-
-pub const fn rx_snr_threshold(submode: Submode) -> i32 {
-    data(submode).rx_snr_threshold
-}
-
-pub const fn rx_threshold(submode: Submode) -> i32 {
-    data(submode).rx_threshold
-}
-
-/// Start delay after tx start before sending data, in milliseconds.
-pub const fn start_delay_ms(submode: Submode) -> u64 {
-    data(submode).start_delay_ms
-}
-
-pub const fn tone_spacing(submode: Submode) -> f64 {
-    data(submode).tone_spacing
-}
-
-/// Total TX duration (seconds): `data_duration + start_delay_ms/1000`.
-pub const fn tx_duration(submode: Submode) -> f64 {
-    data(submode).tx_duration
-}
-
-pub const fn late_threshold_multiplier(submode: Submode) -> f64 {
-    match submode as i32 {
-        8 | 2 => 0.5,
-        1 => 0.75,
-        0 | 4 => 1.0,
-        _ => unreachable!(),
-    }
-}
-
-/// Compute which cycle we are currently in based on submode frames per cycle and current `k` position.
-pub const fn compute_cycle_for_decode(submode: Submode, k: usize) -> usize {
-    let max_frames = commons::JS8_RX_SAMPLE_SIZE;
-    let cycle_frames = samples_per_period(submode) as usize;
-
-    (k / cycle_frames) % (max_frames / cycle_frames)
-}
-
-/// Compute an alternate cycle offset by a specific number of frames.
-pub const fn compute_alt_cycle_for_decode(
-    submode: Submode,
-    k: usize,
-    offset_frames: usize,
-) -> usize {
-    let max_frames = commons::JS8_RX_SAMPLE_SIZE;
-    let alt_k = if k >= offset_frames {
-        k - offset_frames
-    } else {
-        max_frames - ((offset_frames - k) % max_frames)
-    };
-
-    compute_cycle_for_decode(submode, alt_k % max_frames)
-}
-
-pub const fn compute_ratio(submode: Submode, period_s: f64) -> f64 {
-    let d = data(submode);
-    (period_s - d.data_duration) / period_s
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        FAST, NORMAL, SLOW, Submode, TURBO, ULTRA, compute_alt_cycle_for_decode,
-        compute_cycle_for_decode, floor_f64,
-    };
+    use super::{FAST, NORMAL, SLOW, Submode, TURBO, ULTRA, floor_f64};
     use crate::internal::commons::JS8_RX_SAMPLE_SIZE;
 
     #[test]
@@ -383,11 +339,11 @@ mod tests {
         let max_frames = JS8_RX_SAMPLE_SIZE;
         let cycles = max_frames / period;
         let k = period * (cycles + 3);
-        assert_eq!(compute_cycle_for_decode(Submode::Fast, k), 3);
+        assert_eq!(Submode::Fast.compute_cycle_for_decode(k), 3);
 
         let offset: usize = 5_000;
-        let alt = compute_alt_cycle_for_decode(Submode::Fast, offset - 100, offset);
-        let expected = compute_cycle_for_decode(Submode::Fast, max_frames - 100);
+        let alt = Submode::Fast.compute_alt_cycle_for_decode(offset - 100, offset);
+        let expected = Submode::Fast.compute_cycle_for_decode(max_frames - 100);
         assert_eq!(alt, expected);
     }
 }

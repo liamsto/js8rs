@@ -41,4 +41,4 @@ mod varicode;
 /// Number of tone symbols in an encoded JS8 frame.
 pub use encoder::TONES_PER_FRAME;
 /// Common protocol types.
-pub use protocol::{DecodeModes, FrameFlags, FrameType, Js8Protocol, Submode};
+pub use protocol::{DecodeModes, FrameFlags, FrameType, Submode};

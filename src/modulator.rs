@@ -8,7 +8,7 @@
 use crate::codec::EncodedFrame;
 use crate::encoder::TONES_PER_FRAME;
 use crate::internal::commons::JS8_NUM_SYMBOLS;
-use crate::protocol::{Js8Protocol, Submode, SubmodeLookup};
+use crate::protocol::Submode;
 use crate::timing::unix_time_ms;
 use num_complex::Complex64;
 use std::f64::consts::TAU;
@@ -46,7 +46,6 @@ const MS_PER_SEC_U64: u64 = 1_000;
 /// PCM modulator. Generates interleaved stereo i16 frames (L,R) at 48 kHz.
 pub struct Modulator {
     m_state: AtomicU8,
-    m_quick_close: bool,
     m_tuning: bool,
     m_audio_frequency: f64,
     m_audio_frequency0: f64,
@@ -84,7 +83,6 @@ impl Modulator {
     pub const fn new() -> Self {
         Self {
             m_state: AtomicU8::new(Self::ST_IDLE),
-            m_quick_close: false,
             m_tuning: false,
             m_audio_frequency: 0.0,
             m_audio_frequency0: 0.0,
@@ -150,18 +148,12 @@ impl Modulator {
     pub fn tune(&mut self, tuning: bool) {
         self.m_tuning = tuning;
         if !self.m_tuning {
-            self.stop(true);
+            self.stop();
         }
     }
 
-    /// Equivalent to C++ `stop(bool)`.
-    pub fn stop(&mut self, quick_close: bool) {
-        self.m_quick_close = quick_close;
-        self.close();
-    }
-
-    /// Equivalent to C++ `close()`, minus the `SoundOutput` interactions.
-    pub fn close(&mut self) {
+    /// Stops modulation and releases the current frame.
+    pub fn stop(&mut self) {
         self.state_store(State::Idle);
         self.open = false;
     }
@@ -175,7 +167,7 @@ impl Modulator {
         tx_delay: Duration,
         channel: Channel,
     ) {
-        self.start_tones_with::<Js8Protocol>(
+        self.start_tones(
             &frame.tones,
             frame.submode,
             now_unix_ms,
@@ -195,41 +187,16 @@ impl Modulator {
         tx_delay: Duration,
         channel: Channel,
     ) {
-        self.start_tones_with::<Js8Protocol>(
-            tones,
-            submode,
-            now_unix_ms,
-            frequency_hz,
-            tx_delay,
-            channel,
-        );
-    }
-
-    /// Starts fixed tones using a custom submode lookup.
-    ///
-    /// This is primarily for testing or advanced use cases. Most of the time, you should use
-    /// [`Self::start`] or [`Self::start_tones`].
-    pub fn start_tones_with<L: SubmodeLookup>(
-        &mut self,
-        tones: &[u8; TONES_PER_FRAME],
-        submode: Submode,
-        now_unix_ms: u64,
-        frequency_hz: f64,
-        tx_delay: Duration,
-        channel: Channel,
-    ) {
         let current_state = self.state_load();
         if current_state != State::Idle {
-            // C++ logs and calls stop().
-            self.stop(false);
+            self.stop();
         }
 
-        self.m_quick_close = false;
         self.m_audio_frequency = frequency_hz;
         self.itone = *tones;
 
-        self.m_nsps = L::samples_for_one_symbol(submode);
-        self.m_tone_spacing = L::tone_spacing(submode);
+        self.m_nsps = submode.samples_for_one_symbol() as f64;
+        self.m_tone_spacing = submode.tone_spacing();
         self.m_symbol_frames = 4.0 * self.m_nsps;
         self.m_next_symbol = 0.0;
 
@@ -247,8 +214,8 @@ impl Modulator {
 
         if !self.m_tuning {
             // Timing alignment to submode period and nominal start delay.
-            let period_ms: u64 = L::period_seconds(submode).saturating_mul(MS_PER_SEC_U64);
-            let start_delay_ms: u64 = L::start_delay_ms(submode);
+            let period_ms = submode.period_seconds().saturating_mul(MS_PER_SEC_U64);
+            let start_delay_ms = submode.start_delay_ms();
 
             let period_offset_ms: u64 = if period_ms > 0 {
                 now_unix_ms % period_ms
@@ -485,63 +452,13 @@ impl Modulator {
 mod tests {
     use super::*;
 
-    struct FakeSubmode;
-    impl SubmodeLookup for FakeSubmode {
-        fn samples_for_one_symbol(_submode: Submode) -> f64 {
-            1200.0
-        }
-        fn tone_spacing(_submode: Submode) -> f64 {
-            10.0
-        }
-        fn period_seconds(_submode: Submode) -> u64 {
-            10
-        }
-        fn start_delay_ms(_submode: Submode) -> u64 {
-            500
-        }
-        fn tx_duration(_submode: Submode) -> f64 {
-            8.0
-        }
-        fn compute_ratio(_submode: Submode) -> f64 {
-            0.8
-        }
-        fn late_threshold_multiplier(_submode: Submode) -> f64 {
-            1.0
-        }
-    }
-
-    struct NoDelaySubmode;
-    impl SubmodeLookup for NoDelaySubmode {
-        fn samples_for_one_symbol(_submode: Submode) -> f64 {
-            1200.0
-        }
-        fn tone_spacing(_submode: Submode) -> f64 {
-            10.0
-        }
-        fn period_seconds(_submode: Submode) -> u64 {
-            10
-        }
-        fn start_delay_ms(_submode: Submode) -> u64 {
-            0
-        }
-        fn tx_duration(_submode: Submode) -> f64 {
-            8.0
-        }
-        fn compute_ratio(_submode: Submode) -> f64 {
-            0.8
-        }
-        fn late_threshold_multiplier(_submode: Submode) -> f64 {
-            1.0
-        }
-    }
-
     #[test]
     fn read_returns_zero_after_transmission_finishes() {
         let mut modulator = Modulator::new();
-        modulator.start_tones_with::<NoDelaySubmode>(
+        modulator.start_tones(
             &[0; 79],
-            Submode::Normal,
-            0,
+            Submode::Fast,
+            200,
             1500.0,
             Duration::ZERO,
             Channel::Mono,
@@ -561,7 +478,7 @@ mod tests {
     #[test]
     fn start_enters_synchronizing_when_start_delay_not_elapsed() {
         let mut modulator = Modulator::new();
-        modulator.start_tones_with::<FakeSubmode>(
+        modulator.start_tones(
             &[0; 79],
             Submode::Normal,
             100, // 100ms into slot, still before 500ms start delay
@@ -575,10 +492,10 @@ mod tests {
     #[test]
     fn start_without_delay_enters_active_and_generates_samples() {
         let mut modulator = Modulator::new();
-        modulator.start_tones_with::<NoDelaySubmode>(
+        modulator.start_tones(
             &[0; 79],
             Submode::Fast,
-            0,
+            200,
             1500.0,
             Duration::ZERO,
             Channel::Mono,
@@ -594,20 +511,20 @@ mod tests {
     #[test]
     fn channel_routing_matches_mode() {
         let mut left = Modulator::new();
-        left.start_tones_with::<NoDelaySubmode>(
+        left.start_tones(
             &[0; 79],
             Submode::Fast,
-            0,
+            200,
             1500.0,
             Duration::ZERO,
             Channel::Left,
         );
 
         let mut right = Modulator::new();
-        right.start_tones_with::<NoDelaySubmode>(
+        right.start_tones(
             &[0; 79],
             Submode::Fast,
-            0,
+            200,
             1500.0,
             Duration::ZERO,
             Channel::Right,
@@ -629,10 +546,10 @@ mod tests {
     #[test]
     fn active_transmission_eventually_returns_to_idle() {
         let mut modulator = Modulator::new();
-        modulator.start_tones_with::<NoDelaySubmode>(
+        modulator.start_tones(
             &[0; 79],
-            Submode::Normal,
-            0,
+            Submode::Fast,
+            200,
             1500.0,
             Duration::ZERO,
             Channel::Mono,

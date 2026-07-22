@@ -6,9 +6,8 @@
 // Ported the detector to Rust and added no alloc typed input paths.
 
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::internal::commons::JS8_RX_SAMPLE_SIZE;
+use crate::{internal::commons::JS8_RX_SAMPLE_SIZE, timing::unix_time_ms};
 
 /// Input sample rate expected by the detector
 pub const INPUT_SAMPLE_RATE_HZ: u32 = 48_000;
@@ -294,7 +293,7 @@ impl Detector {
 }
 
 fn reset_buffer_position_locked(period_s: u64, g: &mut Inner) {
-    let now_ms = now_utc_ms_u64();
+    let now_ms = unix_time_ms();
     let ms_in_day = now_ms % 86_400_000u64;
     let ms_in_period = ms_in_day % (period_s * 1000u64);
 
@@ -320,15 +319,8 @@ fn reset_buffer_content_locked(g: &mut Inner) {
     g.d2.fill(0);
 }
 
-fn now_utc_ms_u64() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 fn second_in_period(period_s: u64) -> u64 {
-    let now_ms = now_utc_ms_u64();
+    let now_ms = unix_time_ms();
     let sec_in_day = (now_ms % 86_400_000) / 1000;
     sec_in_day % period_s
 }
