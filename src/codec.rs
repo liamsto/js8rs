@@ -55,14 +55,17 @@ pub struct BuildFramesOptions {
 }
 
 impl BuildFramesOptions {
-    /// Creates options for `text` in `submode`.
+    /// Creates options for `text` in `submode`, normalizing ASCII letters to uppercase.
     #[must_use]
     pub fn new(text: impl Into<String>, submode: Submode) -> Self {
+        let mut text = text.into();
+        text.make_ascii_uppercase();
+
         Self {
             mycall: String::new(),
             mygrid: String::new(),
             selected_call: String::new(),
-            text: text.into(),
+            text,
             force_identify: false,
             force_data: false,
             submode,
@@ -337,6 +340,9 @@ pub fn parse_compound(encoded: &str) -> Option<ParsedCompound> {
 }
 
 /// Encodes an exact 12-byte packed frame into 79 tone indices.
+///
+/// Only use this if you need to manually encode a frame for some reason. For normal usage,
+/// it is easier and better to use `build_frames`.
 pub fn encode_tones(
     flags: FrameFlags,
     submode: Submode,
