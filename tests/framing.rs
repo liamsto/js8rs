@@ -30,6 +30,16 @@ fn frames_always_mark_first_and_last() {
 }
 
 #[test]
+fn lowercase_text_is_normalized_before_framing() {
+    let lowercase = build_frames(&BuildFramesOptions::new("Hello, world!", Submode::Normal));
+    let uppercase = build_frames(&BuildFramesOptions::new("HELLO, WORLD!", Submode::Normal));
+
+    assert_eq!(lowercase, uppercase);
+    assert!(!lowercase.frames.is_empty());
+    assert!(lowercase.encode().is_ok());
+}
+
+#[test]
 fn force_data_produces_data_flagged_frames() {
     let built = build_frames(
         &BuildFramesOptions::new(

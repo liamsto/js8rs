@@ -1913,6 +1913,10 @@ pub fn build_message_frames(
                 line_frames.push((frame, itype));
                 line = mid_bytes(&line, m);
             }
+
+            if !(use_bcn || use_cmp || use_dir || use_dat) {
+                break;
+            }
         }
 
         if !line_frames.is_empty() {
@@ -2386,6 +2390,22 @@ mod tests {
             None,
         );
         assert_eq!(clean, spaced);
+    }
+
+    #[test]
+    fn build_message_frames_stops_on_unsupported_input() {
+        let frames = build_message_frames(
+            "K1ABC",
+            "EM73",
+            "",
+            "\u{2603}",
+            false,
+            false,
+            Submode::Normal,
+            None,
+        );
+
+        assert!(frames.is_empty());
     }
 
     #[test]
