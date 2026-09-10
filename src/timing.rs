@@ -8,7 +8,6 @@
 //! Transmit-slot alignment and gating.
 
 use crate::protocol::Submode;
-use core::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Inputs that affect slot math and TX gating.
@@ -49,7 +48,7 @@ impl TxTimingConfig {
 
 /// Computed properties for the current slot.
 #[non_exhaustive]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TransmitSlot {
     /// Submode whose slot properties were used.
     pub submode: Submode,
@@ -83,27 +82,6 @@ pub struct TransmitSlot {
     pub latest_start_ms_exclusive: u64,
 }
 
-impl fmt::Debug for TransmitSlot {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TimeSlot")
-            .field("submode", &self.submode)
-            .field("now_unix_ms", &self.now_unix_ms)
-            .field("period_seconds", &self.period_seconds)
-            .field("slot_start_ms", &self.slot_start_ms)
-            .field("slot_end_ms", &self.slot_end_ms)
-            .field("ms_into_slot", &self.ms_into_slot)
-            .field("seconds_into_slot", &self.seconds_into_slot)
-            .field("fraction_into_slot", &self.fraction_into_slot)
-            .field("tx_duration_seconds", &self.tx_duration_seconds)
-            .field("tx_window_end_ms", &self.tx_window_end_ms)
-            .field("tx_delay_seconds", &self.tx_delay_seconds)
-            .field("tx_delay_window_start_ms", &self.tx_delay_window_start_ms)
-            .field("late_threshold_fraction", &self.late_threshold_fraction)
-            .field("latest_start_ms_exclusive", &self.latest_start_ms_exclusive)
-            .finish()
-    }
-}
-
 /// Timing related params per mode.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,22 +106,13 @@ pub struct TimingParams {
 #[must_use]
 pub fn compute_slot(submode: Submode, now_unix_ms: u64, config: TxTimingConfig) -> TransmitSlot {
     let period_seconds = submode.period_seconds();
-    let period_ms = period_seconds.saturating_mul(1000);
-
-    // Avoid division-by-zero behavior if caller supplies invalid lookup data.
-    // (In practice, period_seconds should never be 0.)
-    let safe_period_ms = if period_ms == 0 { 1 } else { period_ms };
-
-    let ms_into_slot = now_unix_ms % safe_period_ms;
+    let period_ms = period_seconds * 1000;
+    let ms_into_slot = now_unix_ms % period_ms;
     let slot_start_ms = now_unix_ms - ms_into_slot;
-    let slot_end_ms = slot_start_ms + safe_period_ms;
+    let slot_end_ms = slot_start_ms + period_ms;
 
     let seconds_into_slot = (ms_into_slot as f64) / 1000.0;
-    let fraction_into_slot = if period_seconds == 0 {
-        0.0
-    } else {
-        seconds_into_slot / (period_seconds as f64)
-    };
+    let fraction_into_slot = seconds_into_slot / (period_seconds as f64);
 
     let tx_duration_seconds = submode.tx_duration();
     let tx_window_end_ms = slot_start_ms.saturating_add((tx_duration_seconds * 1000.0) as u64);
@@ -169,18 +138,14 @@ pub fn compute_slot(submode: Submode, now_unix_ms: u64, config: TxTimingConfig) 
 
     // Convert fraction threshold into an absolute ms boundary.
     // JS8Call uses strict `< lateThreshold`; so this is "exclusive".
-    let latest_start_ms_exclusive = if safe_period_ms == 0 {
-        slot_start_ms
-    } else {
-        let boundary = (late_threshold * (safe_period_ms as f64)).floor();
-        slot_start_ms.saturating_add(boundary.max(0.0) as u64)
-    };
+    let boundary = (late_threshold * (period_ms as f64)).floor();
+    let latest_start_ms_exclusive = slot_start_ms.saturating_add(boundary.max(0.0) as u64);
 
     TransmitSlot {
         submode,
         now_unix_ms,
         period_seconds,
-        period_ms: safe_period_ms,
+        period_ms,
         slot_start_ms,
         slot_end_ms,
         ms_into_slot,
@@ -201,8 +166,7 @@ impl TransmitSlot {
     pub const fn params(&self) -> TimingParams {
         let in_tx_delay_window = self.now_unix_ms >= self.tx_delay_window_start_ms;
 
-        let in_tx_payload_window =
-            self.seconds_into_slot >= 0.0 && self.seconds_into_slot < self.tx_duration_seconds;
+        let in_tx_payload_window = self.seconds_into_slot < self.tx_duration_seconds;
 
         let time_is_in_send_region = in_tx_payload_window || in_tx_delay_window;
 

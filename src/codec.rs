@@ -30,18 +30,6 @@ impl Frame {
     }
 }
 
-/// Extra addressing information found while building frames.
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct MessageInfo {
-    /// Directed-message destination.
-    pub directed_to: String,
-    /// Directed command.
-    pub directed_command: String,
-    /// Optional directed numeric argument.
-    pub directed_number: String,
-}
-
 /// Options used to split application text into JS8 frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildFramesOptions {
@@ -108,7 +96,7 @@ impl BuildFramesOptions {
     }
 }
 
-/// Frames and display text produced by [`build_frames`].
+/// Frames produced by [`build_frames`].
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildFramesResult {
@@ -116,12 +104,6 @@ pub struct BuildFramesResult {
     pub submode: Submode,
     /// Packed frames in transmission order.
     pub frames: Vec<Frame>,
-    /// Text representing the transmitted frames.
-    pub transmit_text: String,
-    /// Plaintext content reconstructed while building.
-    pub plaintext: String,
-    /// Directed-message details, when present.
-    pub info: MessageInfo,
 }
 
 /// A frame encoded into its complete 79-tone waveform description.
@@ -249,7 +231,6 @@ impl std::error::Error for EncodeError {}
 #[must_use]
 /// Splits application text into packed frames using the supplied options.
 pub fn build_frames(options: &BuildFramesOptions) -> BuildFramesResult {
-    let mut info = varicode::MessageInfo::default();
     let raw_frames = varicode::build_message_frames(
         &options.mycall,
         &options.mygrid,
@@ -258,38 +239,19 @@ pub fn build_frames(options: &BuildFramesOptions) -> BuildFramesResult {
         options.force_identify,
         options.force_data,
         options.submode,
-        Some(&mut info),
     );
 
-    let mut frames = Vec::with_capacity(raw_frames.len());
-    let mut transmit_text = String::new();
-    let mut plaintext = String::new();
-
-    for (encoded, bits) in raw_frames {
-        let parsed = DecodedFrame::new(
+    let frames = raw_frames
+        .into_iter()
+        .map(|(encoded, bits)| Frame {
             encoded,
-            FrameFlags::from_bits_truncate(bits),
-            options.submode,
-        );
-        transmit_text.push_str(&parsed.log_line(0, 0, 0.0, 0));
-        plaintext.push_str(&parsed.message);
-
-        frames.push(Frame {
-            encoded: parsed.encoded,
             flags: FrameFlags::from_bits_truncate(bits),
-        });
-    }
+        })
+        .collect();
 
     BuildFramesResult {
         submode: options.submode,
         frames,
-        transmit_text,
-        plaintext,
-        info: MessageInfo {
-            directed_to: info.dir_to,
-            directed_command: info.dir_cmd,
-            directed_number: info.dir_num,
-        },
     }
 }
 

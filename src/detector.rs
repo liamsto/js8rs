@@ -19,7 +19,7 @@ pub const NDOWN: usize = 4;
 // FIR lowpass coefficients
 // (ScopeFIR, Ntaps=49, fs=48k, fc=4500, fstop=6000, ripple=1dB, stop=40dB, fout=12k)
 const NTAPS: usize = 49;
-const LOWPASS: [f32; NTAPS] = [
+pub(crate) const LOWPASS: [f32; NTAPS] = [
     0.000_861_074_f32,
     0.010_051_92_f32,
     0.010_161_984_f32,
@@ -330,14 +330,14 @@ fn second_in_period(period_s: u64) -> u64 {
 /// - caller provides 4 new 48 kHz samples per output sample,
 /// - internal FIR state advances by 4 samples,
 /// - one 12 kHz output is produced.
-struct FirDecimator49x4 {
+pub(crate) struct FirDecimator49x4 {
     h: [f32; NTAPS],
     z: [f32; NTAPS * 2],
     w: usize,
 }
 
 impl FirDecimator49x4 {
-    const fn new(h: [f32; NTAPS]) -> Self {
+    pub(crate) const fn new(h: [f32; NTAPS]) -> Self {
         Self {
             h,
             z: [0.0; NTAPS * 2],
@@ -360,18 +360,20 @@ impl FirDecimator49x4 {
     ///
     /// Output conversion uses truncation toward zero (using `i32::from()`), then saturates to i16.
     #[inline]
-    fn down_sample_i16(&mut self, x4: [i16; NDOWN]) -> i16 {
+    pub(crate) fn down_sample_i16(&mut self, x4: [i16; NDOWN]) -> i16 {
         self.push(f32::from(x4[0]));
         self.push(f32::from(x4[1]));
         self.push(f32::from(x4[2]));
         self.push(f32::from(x4[3]));
 
         let samples = &self.z[self.w..self.w + NTAPS];
-        let mut acc = 0.0f32;
+        let mut sums = [0.0f32; 4];
         for k in 0..NTAPS / 2 {
             let pair = samples[k] + samples[NTAPS - 1 - k];
-            acc = self.h[k].mul_add(pair, acc);
+            let lane = k & 3;
+            sums[lane] = self.h[k].mul_add(pair, sums[lane]);
         }
+        let mut acc = (sums[0] + sums[1]) + (sums[2] + sums[3]);
         acc = self.h[NTAPS / 2].mul_add(samples[NTAPS / 2], acc);
         let yi = acc as i32;
         if yi > i32::from(i16::MAX) {

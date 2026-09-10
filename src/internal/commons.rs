@@ -64,6 +64,10 @@ pub struct DecodeParams {
     pub ksz_i: usize,
     /// Submodes to decode.
     pub nsubmodes: u8,
+    /// Absolute starts of continuous decode windows, ordered A/B/C/E/I.
+    /// `None` selects the normal independent full-spectrum calculation.
+    #[cfg(feature = "experimental-time")]
+    pub(crate) stream_starts: Option<[u64; 5]>,
 }
 
 pub struct DecData<'a> {

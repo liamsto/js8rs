@@ -93,6 +93,8 @@ pub struct DecodeMode<
     cd0: Align64<[Complex32; NP]>,
     dd: Vec<f32>,
     s: Vec<[f32; NHSYM]>,
+    #[cfg(feature = "experimental-time")]
+    spectrum_sum: [f32; NSPS],
     savg: [f32; NSPS],
     plans: FftPlanManager,
     m_soft_combiner: SoftCombiner<N>,
@@ -102,6 +104,10 @@ pub struct DecodeMode<
     baseline_p: [[f64; 2]; BASELINE_COUNT],
     baseline_c: [f64; BASELINE_COUNT],
     taper: [[f32; NDDP1]; 2],
+    #[cfg(feature = "experimental-time")]
+    spectrum_start: Option<u64>,
+    #[cfg(feature = "experimental-time")]
+    spectrum_updates: u8,
 }
 
 macro_rules! define_decode_mode {
@@ -153,6 +159,8 @@ impl<
             cd0: Align64([CZERO; NP]),
             dd: vec![0.0; Mode::NMAX],
             s: vec![[0.0; NHSYM]; NSPS],
+            #[cfg(feature = "experimental-time")]
+            spectrum_sum: [0.0; NSPS],
             savg: [0.0; NSPS],
             plans: FftPlanManager::new(),
             m_soft_combiner: SoftCombiner::new(),
@@ -162,6 +170,10 @@ impl<
             baseline_p: [[0.0; 2]; BASELINE_COUNT],
             baseline_c: [0.0; BASELINE_COUNT],
             taper: [[0.0; NDDP1]; 2],
+            #[cfg(feature = "experimental-time")]
+            spectrum_start: None,
+            #[cfg(feature = "experimental-time")]
+            spectrum_updates: 0,
         }
     }
 
@@ -859,21 +871,47 @@ impl<
         }
     }
 
-    pub(super) fn syncjs8(&mut self, mut nfa: i32, mut nfb: i32) -> Vec<Sync> {
+    pub(super) fn syncjs8(
+        &mut self,
+        mut nfa: i32,
+        mut nfb: i32,
+        spectrum_shift: Option<usize>,
+    ) -> Vec<Sync> {
         let costas = Self::costas();
         let costas = costas.map(|row| row.map(usize::from));
-
-        self.savg.fill(0.0);
 
         let fft = self
             .plans
             .get_or_create(FftPlanType::SD, Mode::NFFT1, false);
-        for j in 0..Mode::NHSYM {
+        let spectra = (Mode::NMAX - Mode::NFFT1) / Mode::NSTEP + 1;
+
+        #[cfg(feature = "experimental-time")]
+        let first = if let Some(shift) = spectrum_shift.filter(|&shift| shift < spectra) {
+            for (i, row) in self.s.iter_mut().enumerate() {
+                for &power in &row[..shift] {
+                    self.spectrum_sum[i] -= power;
+                }
+                row.copy_within(shift..spectra, 0);
+                row[spectra - shift..].fill(0.0);
+            }
+            self.spectrum_updates += 1;
+            spectra - shift
+        } else {
+            self.spectrum_sum.fill(0.0);
+            self.spectrum_updates = 0;
+            0
+        };
+        #[cfg(not(feature = "experimental-time"))]
+        let first = {
+            let _ = spectrum_shift;
+            self.savg.fill(0.0);
+            0
+        };
+
+        for j in first..spectra {
             let ia = j * Mode::NSTEP;
             let ib = ia + Mode::NFFT1;
-            if ib > Mode::NMAX {
-                break;
-            }
+            debug_assert!(ib <= Mode::NMAX);
 
             for k in 0..Mode::NFFT1 {
                 let re = self.dd[ia + k] * self.nuttal[k];
@@ -885,9 +923,28 @@ impl<
             for i in 0..Mode::NSPS {
                 let power = self.sd_time[i].norm_sqr();
                 self.s[i][j] = power;
-                self.savg[i] += power;
+                #[cfg(feature = "experimental-time")]
+                {
+                    self.spectrum_sum[i] += power;
+                }
+                #[cfg(not(feature = "experimental-time"))]
+                {
+                    self.savg[i] += power;
+                }
             }
         }
+
+        // Bound subtraction error in long-running streams without throwing
+        // away the reusable FFT columns.
+        #[cfg(feature = "experimental-time")]
+        if self.spectrum_updates == 32 {
+            for (sum, row) in self.spectrum_sum.iter_mut().zip(&self.s) {
+                *sum = row[..spectra].iter().copied().sum();
+            }
+            self.spectrum_updates = 0;
+        }
+        #[cfg(feature = "experimental-time")]
+        self.savg.copy_from_slice(&self.spectrum_sum);
 
         let nwin = nfb - nfa;
         let (_orig_nfa, _orig_nfb) = (nfa, nfb);
@@ -1015,9 +1072,13 @@ impl<
             }
         }
 
-        // A single stable sort followed by greedy suppression is equivalent to
+        // A single sort followed by greedy suppression is equivalent to
         // repeatedly sorting and removing the selected candidate's neighborhood.
-        entries.sort_by(|a, b| b.sync.total_cmp(&a.sync));
+        entries.sort_unstable_by(|a, b| {
+            b.sync
+                .total_cmp(&a.sync)
+                .then_with(|| a.freq.total_cmp(&b.freq))
+        });
         let mut candidates = Vec::with_capacity(NMAXCAND.min(entries.len()));
         for entry in entries {
             if entry.sync < ASYNCMIN || entry.sync.is_nan() {
@@ -1248,6 +1309,7 @@ impl<
         data: &DecData<'_>,
         kpos: &usize,
         ksz: &usize,
+        stream_start: Option<u64>,
         mut emit_event: E,
     ) -> usize
     where
@@ -1292,6 +1354,30 @@ impl<
         }
 
         let mut decodes: DecodeMap = HashMap::new();
+        #[cfg(feature = "experimental-time")]
+        let spectrum_shift = match (self.spectrum_start, stream_start) {
+            (Some(previous), Some(current)) if current >= previous => {
+                let delta = current - previous;
+                let step = Mode::NSTEP as u64;
+                if delta.is_multiple_of(step) {
+                    usize::try_from(delta / step).ok()
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        #[cfg(feature = "experimental-time")]
+        {
+            self.spectrum_start = stream_start;
+        }
+        #[cfg(feature = "experimental-time")]
+        let mut spectrum_valid = stream_start.is_some();
+        #[cfg(not(feature = "experimental-time"))]
+        let spectrum_shift = {
+            let _ = stream_start;
+            None
+        };
 
         let ttl_secs_i32 = Mode::NTXDUR * 2;
 
@@ -1299,14 +1385,16 @@ impl<
         self.m_soft_combiner.flush(ttl);
 
         for ipass in 1..=3 {
-            let mut candidates = self.syncjs8(data.params.nfa as i32, data.params.nfb as i32);
+            let shift = (ipass == 1).then_some(spectrum_shift).flatten();
+            let mut candidates =
+                self.syncjs8(data.params.nfa as i32, data.params.nfb as i32, shift);
 
             if candidates.is_empty() {
                 break;
             }
             let nfqso = data.params.nfqso;
 
-            candidates.sort_by(|a, b| {
+            candidates.sort_unstable_by(|a, b| {
                 let a_dist = (a.freq - nfqso as f32).abs();
                 let b_dist = (b.freq - nfqso as f32).abs();
 
@@ -1346,6 +1434,10 @@ impl<
                 );
 
                 if let Some(decode) = res {
+                    #[cfg(feature = "experimental-time")]
+                    if subtract {
+                        spectrum_valid = false;
+                    }
                     let snr = libm::roundf(xsnr) as i32;
 
                     use std::collections::hash_map::Entry;
@@ -1409,6 +1501,13 @@ impl<
 
             if !improved {
                 break;
+            }
+        }
+
+        #[cfg(feature = "experimental-time")]
+        {
+            if !spectrum_valid {
+                self.spectrum_start = None;
             }
         }
 
@@ -1504,6 +1603,18 @@ pub const ENABLE_TURBO: u8 = 1 << 2;
 pub const ENABLE_SLOW: u8 = 1 << 3;
 pub const ENABLE_ULTRA: u8 = 1 << 4;
 
+fn stream_start(data: &DecData<'_>, index: usize) -> Option<u64> {
+    #[cfg(feature = "experimental-time")]
+    {
+        data.params.stream_starts.map(|starts| starts[index])
+    }
+    #[cfg(not(feature = "experimental-time"))]
+    {
+        let _ = (data, index);
+        None
+    }
+}
+
 impl DecoderCore {
     pub(crate) fn decode_pass<E>(&mut self, data: &mut DecData<'_>, emit: &mut E) -> usize
     where
@@ -1520,8 +1631,7 @@ impl DecoderCore {
             let ksz = data.params.ksz_i;
             let decoder = self.i.get_or_insert_with(|| Box::new(DecodeUltra::new()));
 
-            sum += decoder.decode(&*data, &kpos, &ksz, &mut *emit);
-
+            sum += decoder.decode(&*data, &kpos, &ksz, stream_start(data, 4), &mut *emit);
             data.params.kpos_i = kpos;
             data.params.ksz_i = ksz;
         }
@@ -1531,8 +1641,7 @@ impl DecoderCore {
             let ksz = data.params.ksz_e;
             let decoder = self.e.get_or_insert_with(|| Box::new(DecodeSlow::new()));
 
-            sum += decoder.decode(&*data, &kpos, &ksz, &mut *emit);
-
+            sum += decoder.decode(&*data, &kpos, &ksz, stream_start(data, 3), &mut *emit);
             data.params.kpos_e = kpos;
             data.params.ksz_e = ksz;
         }
@@ -1542,8 +1651,7 @@ impl DecoderCore {
             let ksz = data.params.ksz_c;
             let decoder = self.c.get_or_insert_with(|| Box::new(DecodeTurbo::new()));
 
-            sum += decoder.decode(&*data, &kpos, &ksz, &mut *emit);
-
+            sum += decoder.decode(&*data, &kpos, &ksz, stream_start(data, 2), &mut *emit);
             data.params.kpos_c = kpos;
             data.params.ksz_c = ksz;
         }
@@ -1553,8 +1661,7 @@ impl DecoderCore {
             let ksz = data.params.ksz_b;
             let decoder = self.b.get_or_insert_with(|| Box::new(DecodeFast::new()));
 
-            sum += decoder.decode(&*data, &kpos, &ksz, &mut *emit);
-
+            sum += decoder.decode(&*data, &kpos, &ksz, stream_start(data, 1), &mut *emit);
             data.params.kpos_b = kpos;
             data.params.ksz_b = ksz;
         }
@@ -1564,8 +1671,7 @@ impl DecoderCore {
             let ksz = data.params.ksz_a;
             let decoder = self.a.get_or_insert_with(|| Box::new(DecodeNormal::new()));
 
-            sum += decoder.decode(&*data, &kpos, &ksz, &mut *emit);
-
+            sum += decoder.decode(&*data, &kpos, &ksz, stream_start(data, 0), &mut *emit);
             data.params.kpos_a = kpos;
             data.params.ksz_a = ksz;
         }

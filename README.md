@@ -97,6 +97,27 @@ assert_eq!(frames, stereo.len() / 2);
 
 `timing::compute_slot` and `Modulator::start_tones` use the protocol properties exposed by `Submode`. Durations use `std::time::Duration` and Unix timestamps are in ms.
 
+## Time-Independent Operation
+
+The `experimental-time` feature removes the requirement to have timeslot aligned waveforms. This has always been possible (I believe it was discussed in the original FT8 paper as well), and the time is mainly used as a correlator to reduce the search effort (I think). After enabling the feature, you can set up a basic untimed config as follows:
+
+```rust
+use js8rs::protocol::DecodeModes;
+use js8rs::rx::{DecodeConfig, Event, InputFormat, UntimedReceiver};
+
+let mut receiver = UntimedReceiver::with_modes(DecodeModes::FAST);
+let config = DecodeConfig::default().with_modes(DecodeModes::FAST);
+let pcm = [0i16; 2048];
+
+receiver.write_i16(&pcm, InputFormat::Mono, &config, |event| {
+    if let Event::Decoded(frame) = event {
+        println!("frame began at 12 kHz sample {:?}", frame.sample_position);
+    }
+});
+```
+
+For already-decimated audio, `UntimedDecoder::push` accepts new 12 kHz mono samples directly. Both receive paths are synchronous like the normal decoder. You can run the continuous-path benchmarks run with `cargo bench-native --features experimental-time --bench time`.
+
 ## Benchmarking
 
 The library is optimized to make use of SIMD where possible. As such, you will see a huge performance gain if you run a native build on a platform with SIMD support. To enable native CPU instructions for local Criterion runs, use the Cargo alias:

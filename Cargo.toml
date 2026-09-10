@@ -1,6 +1,6 @@
 [package]
 name = "js8rs"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "GPL-3.0-only"
 keywords = ["js8", "radio", "dsp"]
@@ -9,7 +9,6 @@ readme = "README.md"
 
 [dependencies]
 crc = "3.4.0"
-fancy-regex = "0.18.0"
 libm = "0.2.15"
 num-complex = "0.4.6"
 phf = { version = "0.14.0", features = ["macros", "phf_macros"] }
@@ -18,12 +17,10 @@ rustfft = "6.4.1"
 [dev-dependencies]
 criterion = "0.8.2"
 anyhow = "1.0.100"
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 cpal = "0.16.0"
 
 [features]
-escape_sub_char = []
+experimental-time = []
 legacy_pack_data = []
 
 [profile.release]
@@ -56,6 +53,11 @@ harness = false
 [[bench]]
 name = "commands"
 harness = false
+
+[[bench]]
+name = "time"
+harness = false
+required-features = ["experimental-time"]
 
 [lints.clippy]
 manual_midpoint = "warn"

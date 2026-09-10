@@ -9,7 +9,6 @@ use crate::codec::EncodedFrame;
 use crate::encoder::TONES_PER_FRAME;
 use crate::internal::commons::JS8_NUM_SYMBOLS;
 use crate::protocol::Submode;
-use crate::timing::unix_time_ms;
 use num_complex::Complex64;
 use std::f64::consts::TAU;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -114,16 +113,15 @@ impl Modulator {
     }
 
     #[inline]
-    fn state_store(&self, s: State) {
-        let v = match s {
+    fn state_store(&self, state: State) {
+        let value = match state {
             State::Synchronizing => Self::ST_SYNCHRONIZING,
             State::Active => Self::ST_ACTIVE,
             State::Idle => Self::ST_IDLE,
         };
-        self.m_state.store(v, Ordering::Release);
+        self.m_state.store(value, Ordering::Release);
     }
 
-    /// Thread-safe.
     #[inline]
     pub fn is_idle(&self) -> bool {
         self.state_load() == State::Idle
@@ -177,6 +175,15 @@ impl Modulator {
         );
     }
 
+    /// Starts an encoded frame immediately, without UTC slot alignment.
+    ///
+    /// The waveform remains JS8-compatible; only its start time is independent
+    /// of the normal submode slot.
+    #[cfg(feature = "experimental-time")]
+    pub fn start_immediate(&mut self, frame: &EncodedFrame, frequency_hz: f64, channel: Channel) {
+        self.start_tones_immediate(&frame.tones, frame.submode, frequency_hz, channel);
+    }
+
     /// Starts fixed tones using standard JS8 timing data.
     pub fn start_tones(
         &mut self,
@@ -187,8 +194,57 @@ impl Modulator {
         tx_delay: Duration,
         channel: Channel,
     ) {
-        let current_state = self.state_load();
-        if current_state != State::Idle {
+        self.prepare(tones, submode, frequency_hz, channel);
+
+        if !self.m_tuning {
+            // Timing alignment to submode period and nominal start delay.
+            let period_ms = submode.period_seconds() * MS_PER_SEC_U64;
+            let start_delay_ms = submode.start_delay_ms();
+
+            let period_offset_ms = now_unix_ms % period_ms;
+
+            let tx_delay_ms = tx_delay.as_millis().min(u128::from(u64::MAX)) as u64;
+
+            let in_tx_delay_before_period_start =
+                period_ms <= period_offset_ms.saturating_add(tx_delay_ms);
+
+            if in_tx_delay_before_period_start {
+                let additional_ms_needed_for_tx_delay = period_ms.saturating_sub(period_offset_ms);
+                let total_ms = start_delay_ms.saturating_add(additional_ms_needed_for_tx_delay);
+                self.m_silent_frames = (total_ms * FRAME_RATE_U64) / MS_PER_SEC_U64;
+            } else if start_delay_ms > period_offset_ms {
+                let total_ms = start_delay_ms - period_offset_ms;
+                self.m_silent_frames = (total_ms * FRAME_RATE_U64) / MS_PER_SEC_U64;
+            } else {
+                let late_ms = period_offset_ms - start_delay_ms;
+                self.m_ic = ((late_ms * FRAME_RATE_U64) / MS_PER_SEC_U64) as u32;
+            }
+        }
+
+        self.finish_start();
+    }
+
+    /// Starts fixed tones immediately, without UTC slot alignment.
+    #[cfg(feature = "experimental-time")]
+    pub fn start_tones_immediate(
+        &mut self,
+        tones: &[u8; TONES_PER_FRAME],
+        submode: Submode,
+        frequency_hz: f64,
+        channel: Channel,
+    ) {
+        self.prepare(tones, submode, frequency_hz, channel);
+        self.finish_start();
+    }
+
+    fn prepare(
+        &mut self,
+        tones: &[u8; TONES_PER_FRAME],
+        submode: Submode,
+        frequency_hz: f64,
+        channel: Channel,
+    ) {
+        if self.state_load() != State::Idle {
             self.stop();
         }
 
@@ -211,72 +267,14 @@ impl Modulator {
 
         self.channel = channel;
         self.open = true;
+    }
 
-        if !self.m_tuning {
-            // Timing alignment to submode period and nominal start delay.
-            let period_ms = submode.period_seconds().saturating_mul(MS_PER_SEC_U64);
-            let start_delay_ms = submode.start_delay_ms();
-
-            let period_offset_ms: u64 = if period_ms > 0 {
-                now_unix_ms % period_ms
-            } else {
-                0
-            };
-
-            let tx_delay_ms = tx_delay.as_millis().min(u128::from(u64::MAX)) as u64;
-
-            let in_tx_delay_before_period_start =
-                period_ms <= period_offset_ms.saturating_add(tx_delay_ms);
-
-            if in_tx_delay_before_period_start {
-                let additional_ms_needed_for_tx_delay = period_ms.saturating_sub(period_offset_ms);
-                let total_ms = start_delay_ms.saturating_add(additional_ms_needed_for_tx_delay);
-                self.m_silent_frames = (total_ms * FRAME_RATE_U64) / MS_PER_SEC_U64;
-            } else if start_delay_ms > period_offset_ms {
-                let total_ms = start_delay_ms - period_offset_ms;
-                self.m_silent_frames = (total_ms * FRAME_RATE_U64) / MS_PER_SEC_U64;
-            } else {
-                let late_ms = period_offset_ms - start_delay_ms;
-                self.m_ic = ((late_ms * FRAME_RATE_U64) / MS_PER_SEC_U64) as u32;
-            }
-        }
-
+    fn finish_start(&self) {
         if self.m_silent_frames > 0 {
             self.state_store(State::Synchronizing);
         } else {
             self.state_store(State::Active);
         }
-    }
-
-    /// Starts an encoded frame using the current system time.
-    pub fn start_now(
-        &mut self,
-        frame: &EncodedFrame,
-        frequency_hz: f64,
-        tx_delay: Duration,
-        channel: Channel,
-    ) {
-        self.start(frame, unix_time_ms(), frequency_hz, tx_delay, channel);
-    }
-
-    #[inline]
-    fn write_frame(&self, sample: i16, out: &mut [i16], cursor: &mut usize) {
-        debug_assert!(*cursor + 1 < out.len());
-        match self.channel {
-            Channel::Mono => {
-                out[*cursor] = sample;
-                out[*cursor + 1] = sample;
-            }
-            Channel::Left => {
-                out[*cursor] = sample;
-                out[*cursor + 1] = 0;
-            }
-            Channel::Right => {
-                out[*cursor] = 0;
-                out[*cursor + 1] = sample;
-            }
-        }
-        *cursor += 2;
     }
 
     /// Renders interleaved stereo `i16` samples and returns the frame count.
@@ -300,13 +298,10 @@ impl Modulator {
         match self.state_load() {
             State::Synchronizing => {
                 if self.m_silent_frames > 0 {
-                    let mut frames_generated = self.m_silent_frames.min(max_frames);
-
-                    while self.m_silent_frames > 0 && frames_generated > 0 && cursor < out.len() {
-                        self.write_frame(0, out, &mut cursor);
-                        self.m_silent_frames -= 1;
-                        frames_generated -= 1;
-                    }
+                    let frames = self.m_silent_frames.min(max_frames) as usize;
+                    cursor = frames * 2;
+                    out[..cursor].fill(0);
+                    self.m_silent_frames -= frames as u64;
                     if self.m_silent_frames == 0 {
                         self.state_store(State::Active);
                     }

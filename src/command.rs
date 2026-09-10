@@ -1267,6 +1267,12 @@ fn match_command<'a>(
     })
 }
 
+pub(crate) fn command_prefix(text: &str, start: usize) -> Option<(CommandKind, &str, usize)> {
+    let found = match_command(text, text, start, false)?;
+    let end = start + found.def.text.len();
+    Some((found.def.kind, &text[start..end], end))
+}
+
 fn parse_arg<'a>(
     kind: ArgKind,
     upper: &str,
@@ -1304,7 +1310,7 @@ fn parse_arg<'a>(
     }
 }
 
-fn is_grid(grid: &str) -> bool {
+pub(crate) fn is_grid(grid: &str) -> bool {
     let bytes = grid.as_bytes();
     matches!(bytes.len(), 4 | 6 | 8 | 10 | 12)
         && bytes.chunks_exact(2).enumerate().all(|(pair, bytes)| {

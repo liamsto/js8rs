@@ -8,30 +8,19 @@
 #[cfg(test)]
 use crate::protocol::FrameType;
 use crate::{
-    command::{CommandKind, is_buffered_token, is_compound_call, is_valid_call},
+    command::{
+        CommandKind, command_prefix, is_buffered_token, is_compound_call, is_grid, is_valid_call,
+    },
     protocol::{FrameFlags, Submode},
 };
 use phf::phf_map;
-use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, BTreeSet},
-    str,
-    sync::LazyLock,
-};
+use std::str;
 
 #[cfg(test)]
 use std::collections::VecDeque;
 
 mod jsc;
 mod jsc_tables;
-
-/// Extra information out of buildMessageFrames
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MessageInfo {
-    pub dir_to: String,
-    pub dir_cmd: String,
-    pub dir_num: String,
-}
 
 pub const NALPHABET: usize = 41;
 
@@ -51,30 +40,6 @@ const fn build_alphabet72_index() -> [u8; 256] {
 }
 
 const ALPHABET72_INDEX: [u8; 256] = build_alphabet72_index();
-pub const GRID_PATTERN: &str = r"((?<grid>[A-X]{2}[0-9]{2}(?:[A-X]{2}(?:[0-9]{2})?)*)+)";
-pub const COMPOUND_CALLSIGN_PATTERN: &str = r"((?<callsign>(?:[@]?|\b)(?<extended>[A-Z0-9\/@][A-Z0-9\/]{0,2}[\/]?[A-Z0-9\/]{0,3}[\/]?[A-Z0-9\/]{0,3})\b))";
-
-// Full regex strings corresponding to the QRegularExpression constructions
-// Unforunately, concat! cannot handle consts, so all the prior consts have to be inlined.
-pub const DIRECTED_RE: &str = concat!(
-    "^",
-    r"(?<callsign>[@]?[A-Z0-9/]+)",
-    r"(?<cmd>\s?(?:AGN[?]|QSL[?]|HW CPY[?]|MSG TO[:]|SNR[?]|INFO[?]|GRID[?]|STATUS[?]|QUERY MSGS[?]|HEARING[?]|(?:(?:STATUS|HEARING|QUERY CALL|QUERY MSGS|QUERY|CMD|MSG|NACK|ACK|73|YES|NO|HEARTBEAT SNR|SNR|QSL|RR|SK|FB|INFO|GRID|DIT DIT)(?=[ ]|$))|[?> ]))?",
-    r"(?<num>(?<=SNR)\s?[-+]?(?:3[01]|[0-2]?[0-9]))?"
-);
-
-pub const HEARTBEAT_RE: &str = r"^\s*(?<callsign>[@](?:ALLCALL|HB)\s+)?(?<type>CQ CQ CQ|CQ DX|CQ QRP|CQ CONTEST|CQ FIELD|CQ FD|CQ CQ|CQ|HB|HEARTBEAT(?!\s+SNR))(?:\s(?<grid>[A-R]{2}[0-9]{2}))?\b";
-
-pub const COMPOUND_RE: &str = concat!(
-    r"^\s*[`]",
-    r"(?<callsign>[@]?[A-Z0-9/]+)",
-    r"(?<extra>",
-    r"(?<grid>\s?[A-R]{2}[0-9]{2})?", // intentionally first
-    r"(?<cmd>\s?(?:AGN[?]|QSL[?]|HW CPY[?]|MSG TO[:]|SNR[?]|INFO[?]|GRID[?]|STATUS[?]|QUERY MSGS[?]|HEARING[?]|(?:(?:STATUS|HEARING|QUERY CALL|QUERY MSGS|QUERY|CMD|MSG|NACK|ACK|73|YES|NO|HEARTBEAT SNR|SNR|QSL|RR|SK|FB|INFO|GRID|DIT DIT)(?=[ ]|$))|[?> ]))?",
-    r"(?<num>(?<=SNR)\s?[-+]?(?:3[01]|[0-2]?[0-9]))?",
-    r")"
-);
-
 // Huffman table: char -> code
 pub static HUFFTABLE: phf::Map<&'static str, &'static str> = phf_map! {
     " "  => "01",
@@ -122,8 +87,6 @@ pub static HUFFTABLE: phf::Map<&'static str, &'static str> = phf_map! {
     "7"  => "11101011",
     "/"  => "11101010",
 };
-
-pub const EOT: char = '\u{0004}';
 
 // Numeric domain constants
 pub const NBASECALL: u32 = 37 * 36 * 10 * 27 * 27 * 27;
@@ -257,68 +220,13 @@ pub static CQS: phf::Map<u32, &'static str> = phf_map! {
     7u32 => "CQ",
 };
 
-// Status flags in HB messages are deprecated as of 2.2.
-pub static HBS: phf::Map<u32, &'static str> = phf_map! {
-    0u32 => "HB",
-    1u32 => "HB",
-    2u32 => "HB",
-    3u32 => "HB",
-    4u32 => "HB",
-    5u32 => "HB",
-    6u32 => "HB",
-    7u32 => "HB",
-};
-
 use crate::varicode::jsc::{compress_frame, decompress};
 use crc::{CRC_16_KERMIT, CRC_32_BZIP2, Crc};
-use fancy_regex::Regex;
-
-static COMPOUND_CALLSIGN_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(COMPOUND_CALLSIGN_PATTERN).expect("COMPOUND_CALLSIGN_PATTERN regex")
-});
-
-pub fn rstrip(s: &str) -> String {
-    let mut last_non_ws: Option<usize> = None;
-    for (i, ch) in s.char_indices() {
-        if !ch.is_whitespace() {
-            last_non_ws = Some(i);
-        }
-    }
-    last_non_ws.map_or_else(String::new, |i| {
-        let end = i + s[i..].chars().next().unwrap().len_utf8();
-        s[..end].to_string()
-    })
-}
-
-pub fn lstrip(s: &str) -> String {
-    for (i, ch) in s.char_indices() {
-        if !ch.is_whitespace() {
-            return s[i..].to_string();
-        }
-    }
-    String::new()
-}
-
-pub fn default_huff_table() -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    for (k, v) in HUFFTABLE.entries() {
-        out.insert((*k).to_string(), (*v).to_string());
-    }
-    out
-}
-
 pub fn cq_string(number: i32) -> String {
     if number < 0 {
         return String::new();
     }
     CQS.get(&(number as u32)).copied().unwrap_or("").to_string()
-}
-
-pub fn hb_string(number: i32) -> String {
-    if number < 0 {
-        return String::new();
-    }
-    HBS.get(&(number as u32)).copied().unwrap_or("").to_string()
 }
 
 pub fn starts_with_cq(text: &str) -> bool {
@@ -368,120 +276,31 @@ pub fn checksum32_valid(checksum: &str, input: &str) -> bool {
     pack32bits(crc) == checksum
 }
 
-pub fn parse_callsigns(input: &str) -> Vec<String> {
-    let mut out = Vec::new();
+pub fn huff_decode(bitvec: &[bool]) -> String {
+    let mut text = String::new();
+    let mut pos = 0;
 
-    for caps_res in COMPOUND_CALLSIGN_RE.captures_iter(input) {
-        let caps = match caps_res {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let m = match caps.name("callsign") {
-            Some(m) => m,
-            None => continue,
-        };
-
-        let callsign = m.as_str().trim().to_string();
-        if !is_valid_call(&callsign) {
-            continue;
-        }
-
-        if GRID_RE.is_match(&callsign).unwrap_or(false) {
-            continue;
-        }
-
-        out.push(callsign);
-    }
-
-    out
-}
-
-pub fn huff_encode(huff: &BTreeMap<String, String>, text: &str) -> Vec<(usize, Vec<bool>)> {
-    let mut out: Vec<(usize, Vec<bool>)> = Vec::new();
-
-    let mut keys: Vec<&str> = huff.keys().map(std::string::String::as_str).collect();
-    keys.sort_by(|a, b| {
-        let alen = a.chars().count();
-        let blen = b.chars().count();
-        match blen.cmp(&alen) {
-            Ordering::Less => Ordering::Less,
-            Ordering::Greater => Ordering::Greater,
-            _ => b.cmp(a),
-        }
-    });
-
-    let mut i = 0usize; // byte index
-    while i < text.len() {
-        let mut found = false;
-
-        for &k in &keys {
-            if text[i..].starts_with(k) {
-                let code = huff.get(k).expect("key from map");
-                out.push((k.chars().count(), str_to_bits(code)));
-                i += k.len();
-                found = true;
+    while pos < bitvec.len() {
+        let mut found = None;
+        for (key, code) in HUFFTABLE.entries() {
+            if pos + code.len() <= bitvec.len()
+                && code
+                    .bytes()
+                    .enumerate()
+                    .all(|(i, byte)| bitvec[pos + i] == (byte == b'1'))
+            {
+                text.push_str(key);
+                found = Some(code.len());
                 break;
             }
         }
-
-        if !found {
-            let ch_len = text[i..].chars().next().map_or(1, char::len_utf8);
-            i += ch_len;
-        }
-    }
-
-    out
-}
-
-pub fn huff_decode(huff: &BTreeMap<String, String>, bitvec: &[bool]) -> String {
-    let mut text = String::new();
-    let mut bits = bits_to_str(bitvec);
-
-    while !bits.is_empty() {
-        let mut found = false;
-
-        for (key, code) in huff {
-            if bits.starts_with(code) {
-                if key.len() == 1 && key.as_bytes()[0] == (EOT as u8) {
-                    text.push(' ');
-                    found = false;
-                    break;
-                }
-
-                text.push_str(key);
-                bits = bits[code.len()..].to_string();
-                found = true;
-            }
-        }
-
-        if !found {
+        let Some(len) = found else {
             break;
-        }
+        };
+        pos += len;
     }
 
     text
-}
-
-pub fn huff_valid_chars(huff: &std::collections::BTreeMap<String, String>) -> BTreeSet<String> {
-    huff.keys().cloned().collect()
-}
-
-// convert string of 0s and 1s to bool vector
-pub fn str_to_bits(bitvec: &str) -> Vec<bool> {
-    let mut bits = Vec::with_capacity(bitvec.len());
-    for ch in bitvec.chars() {
-        bits.push(ch == '1');
-    }
-    bits
-}
-
-pub fn bits_to_str(bitvec: &[bool]) -> String {
-    let mut s = String::with_capacity(bitvec.len());
-    for &b in bitvec {
-        s.push(if b { '1' } else { '0' });
-    }
-    s
 }
 
 #[cfg(test)]
@@ -503,11 +322,9 @@ pub fn int_to_bits(mut value: u64, expected: usize) -> Vec<bool> {
 }
 
 pub fn bits_to_int(value: &[bool]) -> u64 {
-    let mut v: u64 = 0;
-    for &bit in value {
-        v = (v << 1) + u64::from(bit);
-    }
-    v
+    value
+        .iter()
+        .fold(0, |bits, &bit| (bits << 1) | u64::from(bit))
 }
 
 /// Packs a 16-bit value into a three character sequence.
@@ -896,25 +713,119 @@ pub fn unpack_grid(value: u16) -> String {
     String::from_utf8(grid.to_vec()).expect("grid alphabet is ASCII")
 }
 
-static GRID_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(GRID_PATTERN).unwrap());
+fn call_end(text: &str, start: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut end = start;
+    if bytes.get(end) == Some(&b'@') {
+        end += 1;
+    }
+    let first = end;
+    while bytes
+        .get(end)
+        .is_some_and(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'/')
+    {
+        end += 1;
+    }
+    (end > first).then_some(end)
+}
 
-static HEARTBEAT_REX: LazyLock<Regex> = LazyLock::new(|| Regex::new(HEARTBEAT_RE).unwrap());
+fn skip_space(text: &str, pos: usize) -> usize {
+    text[pos..]
+        .chars()
+        .next()
+        .filter(|ch| ch.is_whitespace())
+        .map_or(pos, |ch| pos + ch.len_utf8())
+}
 
-static COMPOUND_REX: LazyLock<Regex> = LazyLock::new(|| Regex::new(COMPOUND_RE).unwrap());
+fn parse_cmd(text: &str, pos: usize) -> Option<(CommandKind, &str, usize)> {
+    let start = skip_space(text, pos);
+    if let Some((kind, _, end)) = command_prefix(text, start) {
+        return Some((kind, &text[pos..end], end));
+    }
+    (text.as_bytes().get(pos) == Some(&b' ')).then_some((CommandKind::FreeText, " ", pos + 1))
+}
+
+fn snr_end(text: &str, pos: usize) -> usize {
+    let mut end = skip_space(text, pos);
+    let start = end;
+    if matches!(text.as_bytes().get(end), Some(b'+' | b'-')) {
+        end += 1;
+    }
+    let digits = end;
+    while end < text.len() && end - digits < 2 && text.as_bytes()[end].is_ascii_digit() {
+        end += 1;
+    }
+    if end == digits {
+        return pos;
+    }
+    text[start..end]
+        .parse::<i32>()
+        .ok()
+        .filter(|value| (-31..=31).contains(value))
+        .map_or(pos, |_| end)
+}
+
+fn heartbeat_parts(text: &str) -> Option<(&str, &str, usize)> {
+    let mut pos = text.len() - text.trim_start().len();
+    for prefix in ["@ALLCALL", "@HB"] {
+        if text[pos..].starts_with(prefix) {
+            let end = pos + prefix.len();
+            let next = skip_space(text, end);
+            if next == end {
+                return None;
+            }
+            pos = next;
+            while skip_space(text, pos) != pos {
+                pos = skip_space(text, pos);
+            }
+            break;
+        }
+    }
+
+    const TYPES: [&str; 10] = [
+        "CQ CQ CQ",
+        "CQ CONTEST",
+        "CQ FIELD",
+        "CQ QRP",
+        "CQ DX",
+        "CQ FD",
+        "CQ CQ",
+        "CQ",
+        "HEARTBEAT",
+        "HB",
+    ];
+    let ty = TYPES.into_iter().find(|ty| {
+        text[pos..].starts_with(ty)
+            && text
+                .as_bytes()
+                .get(pos + ty.len())
+                .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+    })?;
+    let mut end = pos + ty.len();
+    if ty == "HEARTBEAT" && text[end..].trim_start().starts_with("SNR") {
+        return None;
+    }
+
+    let grid_start = skip_space(text, end);
+    let grid_end = grid_start + 4;
+    let grid = if grid_start != end
+        && text.get(grid_start..grid_end).is_some_and(is_grid)
+        && text
+            .as_bytes()
+            .get(grid_end)
+            .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+    {
+        end = grid_end;
+        &text[grid_start..grid_end]
+    } else {
+        ""
+    };
+    Some((ty, grid, end))
+}
 
 fn cqs_key_by_value(v: &str, default_key: u32) -> u32 {
     let mut best: Option<u32> = None;
     for (key, candidate) in CQS.entries() {
-        if *candidate == v {
-            best = Some(best.map_or(*key, |current| current.min(*key)));
-        }
-    }
-    best.unwrap_or(default_key)
-}
-
-fn hbs_key_by_value(v: &str, default_key: u32) -> u32 {
-    let mut best: Option<u32> = None;
-    for (key, candidate) in HBS.entries() {
         if *candidate == v {
             best = Some(best.map_or(*key, |current| current.min(*key)));
         }
@@ -984,42 +895,35 @@ pub fn unpack_cmd(value: u8, num_out: Option<&mut u8>) -> u8 {
 }
 
 pub fn pack_heartbeat_message(text: &str, callsign: &str, n_out: Option<&mut usize>) -> String {
-    let mut frame = String::new();
-
-    let caps = if let Ok(Some(c)) = HEARTBEAT_REX.captures(text) {
-        c
-    } else {
+    let Some((ty, extra, consumed)) = heartbeat_parts(text) else {
         if let Some(n) = n_out {
             *n = 0;
         }
-        return frame;
+        return String::new();
     };
-
-    let extra = caps.name("grid").map_or("", |m| m.as_str());
-    let ty = caps.name("type").map_or("", |m| m.as_str());
     let is_alt = ty.starts_with("CQ");
 
     if callsign.is_empty() {
         if let Some(n) = n_out {
             *n = 0;
         }
-        return frame;
+        return String::new();
     }
 
     let mut packed_extra: u16 = NMAXGRID;
 
-    if extra.len() == 4 && GRID_RE.is_match(extra).unwrap_or(false) {
+    if !extra.is_empty() {
         packed_extra = pack_grid(extra);
     }
 
-    let mut cq_number: u8 = hbs_key_by_value(ty, 0) as u8;
+    let mut cq_number = 0;
 
     if is_alt {
         packed_extra |= 1u16 << 15;
         cq_number = cqs_key_by_value(ty, 0) as u8;
     }
 
-    frame = pack_compound_frame(
+    let frame = pack_compound_frame(
         callsign,
         0u8, /* FrameHeartbeat */
         packed_extra,
@@ -1033,7 +937,6 @@ pub fn pack_heartbeat_message(text: &str, callsign: &str, n_out: Option<&mut usi
     }
 
     if let Some(n) = n_out {
-        let consumed = caps.get(0).map_or(0, |m| m.as_str().len());
         *n = consumed;
     }
     frame
@@ -1070,48 +973,55 @@ pub fn unpack_heartbeat_message(
 }
 
 pub fn pack_compound_message(text: &str, n_out: Option<&mut usize>) -> String {
-    let mut frame = String::new();
-
-    let caps = if let Ok(Some(c)) = COMPOUND_REX.captures(text) {
-        c
-    } else {
+    let mut pos = text.len() - text.trim_start().len();
+    if text.as_bytes().get(pos) != Some(&b'`') {
         if let Some(n) = n_out {
             *n = 0;
         }
-        return frame;
-    };
-
-    let callsign = caps.name("callsign").map_or("", |m| m.as_str());
-    let grid = caps.name("grid").map_or("", |m| m.as_str());
-    let cmd = caps.name("cmd").map_or("", |m| m.as_str());
-    let num_str = caps.name("num").map_or("", |m| m.as_str().trim());
-
-    if callsign.is_empty() {
-        if let Some(n) = n_out {
-            *n = 0;
-        }
-        return frame;
+        return String::new();
     }
+    pos += 1;
+    let Some(end) = call_end(text, pos) else {
+        if let Some(n) = n_out {
+            *n = 0;
+        }
+        return String::new();
+    };
+    let callsign = &text[pos..end];
+    pos = end;
+
+    let grid_start = skip_space(text, pos);
+    let grid_end = grid_start + 4;
+    let grid = if text.get(grid_start..grid_end).is_some_and(is_grid) {
+        pos = grid_end;
+        &text[grid_start..grid_end]
+    } else {
+        ""
+    };
+    let command = parse_cmd(text, pos);
+    let (kind, cmd, mut consumed) = command.unwrap_or((CommandKind::FreeText, "", pos));
+    let num_end = kind
+        .has_snr()
+        .then(|| snr_end(text, consumed))
+        .unwrap_or(consumed);
+    let num_str = &text[consumed..num_end];
+    consumed = num_end;
 
     let mut ty: u8 = 1u8;
     let mut extra: u16 = NMAXGRID;
 
     if !cmd.is_empty() {
-        if let Some(kind) = CommandKind::from_wire(cmd) {
-            let mut packed_num_flag = false;
-            let inum = pack_num(num_str, None);
-            let packed_cmd = pack_cmd(kind.packed_code() as u8, inum, Some(&mut packed_num_flag));
-            extra = NUSERGRID.wrapping_add(u16::from(packed_cmd));
-            ty = 2u8;
-        }
+        let inum = pack_num(num_str.trim(), None);
+        let packed_cmd = pack_cmd(kind.packed_code() as u8, inum, None);
+        extra = NUSERGRID.wrapping_add(u16::from(packed_cmd));
+        ty = 2u8;
     } else if !grid.is_empty() {
         extra = pack_grid(grid);
     }
 
-    frame = pack_compound_frame(callsign, ty, extra, 0);
+    let frame = pack_compound_frame(callsign, ty, extra, 0);
 
     if let Some(n) = n_out {
-        let consumed = caps.get(0).map_or(0, |m| m.as_str().len());
         *n = consumed;
     }
     frame
@@ -1160,8 +1070,6 @@ pub fn unpack_compound_message(
 pub const FRAME_COMPOUND: u8 = 1;
 pub const FRAME_DIRECTED: u8 = 3;
 pub const FRAME_DATA: u8 = 4;
-
-static DIRECTED_REX: LazyLock<Regex> = LazyLock::new(|| Regex::new(DIRECTED_RE).unwrap());
 
 pub fn pack_compound_frame(callsign: &str, ty: u8, num: u16, bits3: u8) -> String {
     let frame = String::new();
@@ -1246,97 +1154,86 @@ pub fn pack_directed_message(
     num_out: Option<&mut String>,
     n_out: Option<&mut usize>,
 ) -> String {
-    let frame = String::new();
-
-    let caps = if let Ok(Some(c)) = DIRECTED_REX.captures(text) {
-        c
-    } else {
+    let Some(to_end) = call_end(text, 0) else {
         if let Some(n) = n_out {
             *n = 0;
         }
-        return frame;
+        return String::new();
     };
-
-    let mut from = mycall.to_string();
-    let is_from_compound = is_compound_call(&from);
-    if is_from_compound {
-        from = "<....>".to_string();
-    }
-
-    let mut to = caps.name("callsign").map_or("", |m| m.as_str()).to_string();
-    let cmd = caps.name("cmd").map_or("", |m| m.as_str()).to_string();
-    let num = caps.name("num").map_or("", |m| m.as_str()).to_string();
-
-    // ensure we have a directed command
-    if cmd.is_empty() {
+    let Some((parsed_kind, cmd, cmd_end)) = parse_cmd(text, to_end) else {
         if let Some(n) = n_out {
             *n = 0;
         }
-        return frame;
-    }
+        return String::new();
+    };
+    let num_end = if parsed_kind.has_snr() {
+        snr_end(text, cmd_end)
+    } else {
+        cmd_end
+    };
+    let num = &text[cmd_end..num_end];
+    let from = if is_compound_call(mycall) {
+        "<....>"
+    } else {
+        mycall
+    };
+    let raw_to = &text[..to_end];
 
     // ensure we have a valid callsign
-    let valid_to_callsign = to != mycall && is_valid_call(&to);
+    let valid_to_callsign = raw_to != mycall && is_valid_call(raw_to);
     if !valid_to_callsign {
         if let Some(n) = n_out {
             *n = 0;
         }
-        return frame;
+        return String::new();
     }
 
     if let Some(p) = to_out {
-        *p = to.clone();
+        *p = raw_to.to_owned();
     }
-    let is_to_compound = valid_to_callsign && is_compound_call(&to);
+    let is_to_compound = is_compound_call(raw_to);
     if let Some(p) = to_compound_out {
         *p = is_to_compound;
     }
 
     // If compound, replace with placeholder; caller will send actual "to" elsewhere.
-    if is_to_compound {
-        to = "<....>".to_string();
-    }
+    let to = if is_to_compound { "<....>" } else { raw_to };
 
     // validate command (allow trimmed version as well)
-    if CommandKind::from_wire(&cmd).is_none() && CommandKind::from_wire(cmd.trim()).is_none() {
+    let Some(kind) = CommandKind::from_wire(cmd).or_else(|| CommandKind::from_wire(cmd.trim()))
+    else {
         if let Some(n) = n_out {
             *n = 0;
         }
-        return frame;
-    }
+        return String::new();
+    };
 
     // packing general number...
     let mut num_ok = false;
     let inum = pack_num(num.trim(), Some(&mut num_ok));
     if num_ok && let Some(p) = num_out {
-        *p = num;
+        *p = num.to_owned();
     }
 
     let mut portable_from = false;
-    let packed_from = pack_callsign(&from, Some(&mut portable_from));
+    let packed_from = pack_callsign(from, Some(&mut portable_from));
 
     let mut portable_to = false;
-    let packed_to = pack_callsign(&to, Some(&mut portable_to));
+    let packed_to = pack_callsign(to, Some(&mut portable_to));
 
     if packed_from == 0 || packed_to == 0 {
         if let Some(n) = n_out {
             *n = 0;
         }
-        return frame;
+        return String::new();
     }
 
-    let mut cmd_out_s = String::new();
-    let mut packed_cmd: u8 = 0;
-
-    if let Some(kind) = CommandKind::from_wire(&cmd) {
-        cmd_out_s = cmd.clone();
-        packed_cmd = kind.packed_code() as u8;
-    }
-    let trimmed = cmd.trim();
-    if let Some(kind) = CommandKind::from_wire(trimmed) {
-        cmd_out_s = trimmed.to_string();
-        packed_cmd = kind.packed_code() as u8;
-    }
+    let cmd_out_s = if CommandKind::from_wire(cmd.trim()).is_some() {
+        cmd.trim()
+    } else {
+        cmd
+    };
+    let packed_cmd = kind.packed_code() as u8;
 
     let packed_flag: u8 = FRAME_DIRECTED;
     let packed_extra: u8 =
@@ -1349,11 +1246,10 @@ pub fn pack_directed_message(
         | u64::from(packed_cmd % 32);
 
     if let Some(p) = cmd_out {
-        *p = cmd_out_s;
+        *p = cmd_out_s.to_owned();
     }
     if let Some(n) = n_out {
-        let consumed = caps.get(0).map_or(0, |m| m.as_str().len());
-        *n = consumed;
+        *n = num_end;
     }
 
     pack72bits(bits, packed_extra)
@@ -1410,10 +1306,6 @@ pub fn unpack_directed_message(text: &str, ty_out: Option<&mut u8>) -> Vec<Strin
     out
 }
 
-/// Whether or not to allow Huffman encoding in the fast data mode. This constant is set to `false` in the current JS8Call-improved code.
-/// Keeping it false for parity, since setting it to `true` breaks decode interoperability between this library and `JS8Call`.
-pub const JS8_FAST_DATA_CAN_USE_HUFF: bool = false;
-
 /// Last index of `false`, `QVector`<bool>`::lastIndexOf(0)`.
 fn last_index_of_zero(bits: &[bool]) -> Option<usize> {
     (0..bits.len()).rev().find(|&i| !bits[i])
@@ -1431,54 +1323,55 @@ fn bits72(value: u64, rem: u8) -> [bool; 72] {
 }
 
 /// Pack a Huffman-coded message into a 72-bit frame (prefix included if provided).
+#[cfg_attr(not(feature = "legacy_pack_data"), allow(dead_code))]
 pub fn pack_huff_message(input: &str, prefix: &[bool], n_out: Option<&mut usize>) -> String {
     const FRAME_SIZE: usize = 72;
-    let mut frame = String::new();
+    let mut bits = 0u128;
+    let mut len = 0;
 
-    let mut frame_bits: Vec<bool> = Vec::new();
-    if !prefix.is_empty() {
-        frame_bits.extend_from_slice(prefix);
+    for &bit in prefix {
+        bits = (bits << 1) | u128::from(bit);
+        len += 1;
     }
 
-    let mut i_chars: usize = 0;
-    let huff: BTreeMap<String, String> = { default_huff_table() };
-    let valid_chars = huff_valid_chars(&huff);
-
+    let mut consumed = 0;
     for ch in input.chars() {
-        let up = ch.to_ascii_uppercase().to_string();
-        if !valid_chars.contains(&up) {
+        if !ch.is_ascii() {
             if let Some(n) = n_out {
                 *n = 0;
             }
-            return frame;
+            return String::new();
         }
+        let byte = [ch.to_ascii_uppercase() as u8];
+        let key = str::from_utf8(&byte).expect("ASCII character");
+        let Some(code) = HUFFTABLE.get(key) else {
+            if let Some(n) = n_out {
+                *n = 0;
+            }
+            return String::new();
+        };
+        if len + code.len() >= FRAME_SIZE {
+            break;
+        }
+        for bit in code.bytes() {
+            bits = (bits << 1) | u128::from(bit == b'1');
+            len += 1;
+        }
+        consumed += 1;
     }
 
-    for (char_n, char_bits) in huff_encode(&huff, input) {
-        if frame_bits.len() + char_bits.len() < FRAME_SIZE {
-            frame_bits.extend(char_bits);
-            i_chars += char_n;
-            continue;
-        }
-        break;
-    }
-
-    let pad = FRAME_SIZE - frame_bits.len();
+    let pad = FRAME_SIZE - len;
     if pad != 0 {
-        // pad: first pad bit 0, remaining pad bits 1
-        for j in 0..pad {
-            frame_bits.push(j != 0);
+        bits <<= pad;
+        if pad > 1 {
+            bits |= (1u128 << (pad - 1)) - 1;
         }
     }
-
-    let value = bits_to_int(&frame_bits[..64]);
-    let rem = bits_to_int(&frame_bits[64..72]) as u8;
-    frame = pack72bits(value, rem);
 
     if let Some(n) = n_out {
-        *n = i_chars;
+        *n = consumed;
     }
-    frame
+    pack72bits((bits >> 8) as u64, bits as u8)
 }
 
 /// Pack a compressed (dense-coded) message into a 72-bit frame (prefix included if provided).
@@ -1550,8 +1443,7 @@ pub fn unpack_data_message(text: &str) -> String {
     if compressed {
         unpacked = decompress(bits);
     } else {
-        let huff = default_huff_table();
-        unpacked = huff_decode(&huff, bits);
+        unpacked = huff_decode(bits);
     }
 
     unpacked
@@ -1559,31 +1451,7 @@ pub fn unpack_data_message(text: &str) -> String {
 
 /// Pack data message using the full 72 bits available (with the data flag in the i3bit header)
 pub fn pack_fast_data_message(input: &str, n_out: Option<&mut usize>) -> String {
-    if JS8_FAST_DATA_CAN_USE_HUFF {
-        let mut huff_chars: usize = 0;
-        let huff_frame = pack_huff_message(input, &[false], Some(&mut huff_chars));
-
-        let mut compressed_chars: usize = 0;
-        let compressed_frame = pack_compressed_message(input, &[true], Some(&mut compressed_chars));
-        if huff_chars > compressed_chars {
-            if let Some(n) = n_out {
-                *n = huff_chars;
-            }
-            huff_frame
-        } else {
-            if let Some(n) = n_out {
-                *n = compressed_chars;
-            }
-            compressed_frame
-        }
-    } else {
-        let mut compressed_chars: usize = 0;
-        let compressed_frame = pack_compressed_message(input, &[], Some(&mut compressed_chars));
-        if let Some(n) = n_out {
-            *n = compressed_chars;
-        }
-        compressed_frame
-    }
+    pack_compressed_message(input, &[], n_out)
 }
 
 /// Unpack data message using the full 72 bits available (with the data flag in the i3bit header)
@@ -1598,32 +1466,12 @@ pub fn unpack_fast_data_message(text: &str) -> String {
     let value: u64 = unpack72bits(text, Some(&mut rem));
     let bits = bits72(value, rem);
 
-    if JS8_FAST_DATA_CAN_USE_HUFF {
-        let compressed = bits[0];
-        let n = match last_index_of_zero(&bits) {
-            Some(v) => v,
-            None => return unpacked,
-        };
+    let n = match last_index_of_zero(&bits) {
+        Some(v) => v,
+        None => return unpacked,
+    };
 
-        if n < 2 {
-            return unpacked;
-        }
-        let bits = &bits[1..n];
-
-        if compressed {
-            unpacked = decompress(bits);
-        } else {
-            let huff = default_huff_table();
-            unpacked = huff_decode(&huff, bits);
-        }
-    } else {
-        let n = match last_index_of_zero(&bits) {
-            Some(v) => v,
-            None => return unpacked,
-        };
-
-        unpacked = decompress(&bits[..n]);
-    }
+    unpacked = decompress(&bits[..n]);
 
     unpacked
 }
@@ -1685,9 +1533,8 @@ fn could_be_directed(text: &str) -> bool {
     false
 }
 
-#[inline]
-fn mid_bytes(s: &str, n: usize) -> String {
-    s.chars().skip(n).collect()
+fn starts_with_call(text: &str) -> bool {
+    call_end(text, 0).is_some_and(|end| end > 3 && is_valid_call(&text[..end]))
 }
 
 pub fn build_message_frames(
@@ -1698,77 +1545,54 @@ pub fn build_message_frames(
     force_identify_in: bool,
     force_data: bool,
     submode: Submode,
-    mut info_out: Option<&mut MessageInfo>,
 ) -> Vec<(String, u8)> {
     // Enabled:
     // ALLOW_SEND_COMPOUND, ALLOW_SEND_COMPOUND_DIRECTED, AUTO_PREPEND_DIRECTED,
     // AUTO_REMOVE_MYCALL, AUTO_PREPEND_DIRECTED_ALLOW_TEXT_CALLSIGNS, ALLOW_FORCE_IDENTIFY,
     // AUTO_RSTRIP_WHITESPACE, and checksum section (#if 1).
-    let mut all_frames: Vec<(String, u8)> = Vec::new();
+    let mut frames = Vec::new();
+    let mut line = text.to_owned();
+    let mut data_only = force_data;
+    let force_identify = force_identify_in && !force_data;
 
-    // JS8_NO_MULTILINE false-path: treat as single line.
-    let lines = [text.to_string()];
+    // AUTO_REMOVE_MYCALL
+    if line.starts_with(mycall) && matches!(line.as_bytes().get(mycall.len()), Some(b':' | b' ')) {
+        line = line[mycall.len() + 1..].trim_start().to_owned();
+    }
 
-    for mut line in lines {
-        let mut line_frames: Vec<(String, u8)> = Vec::new();
+    // AUTO_RSTRIP_WHITESPACE
+    if !line.trim_end().is_empty() {
+        line.truncate(line.trim_end().len());
+    }
 
-        let mut has_directed = false;
-        let mut has_data = false;
-
-        let mut force_identify = force_identify_in;
-
-        if force_data {
-            force_identify = false;
-            has_data = true;
+    // AUTO_PREPEND_DIRECTED
+    if !selected_call.is_empty()
+        && !line.starts_with(selected_call)
+        && !line.starts_with('`')
+        && !force_data
+    {
+        let starts_with_base =
+            line.starts_with("@ALLCALL") || starts_with_cq(&line) || starts_with_hb(&line);
+        if !(starts_with_base || starts_with_call(&line)) {
+            let sep = if line.starts_with(' ') { "" } else { " " };
+            line = format!("{selected_call}{sep}{line}");
         }
+    }
 
-        // AUTO_REMOVE_MYCALL
-        if line.starts_with(mycall)
-            && matches!(line.as_bytes().get(mycall.len()), Some(b':' | b' '))
-        {
-            let cut = mycall.len() + 1;
-            line = lstrip(&mid_bytes(&line, cut));
-        }
-
-        // AUTO_RSTRIP_WHITESPACE
-        let rline = rstrip(&line);
-        if !rline.is_empty() {
-            line = rline;
-        }
-
-        // AUTO_PREPEND_DIRECTED
-        if !selected_call.is_empty()
-            && !line.starts_with(selected_call)
-            && !line.starts_with('`')
-            && !force_data
-        {
-            let line_starts_with_base_call =
-                line.starts_with("@ALLCALL") || starts_with_cq(&line) || starts_with_hb(&line);
-
-            let calls = parse_callsigns(&line);
-            let line_starts_with_standard_call =
-                !calls.is_empty() && line.starts_with(&calls[0]) && calls[0].len() > 3;
-
-            if !(line_starts_with_base_call || line_starts_with_standard_call) {
-                let sep = if line.starts_with(' ') { "" } else { " " };
-                line = format!("{selected_call}{sep}{line}");
-            }
-        }
-
-        while !line.is_empty() {
-            let mut frame = String::new();
-
-            let mut use_bcn = false;
-            let mut use_cmp = false;
-            let mut use_dir = false;
-            let mut use_dat = false;
-
+    while !line.is_empty() {
+        let mut dir_to = String::new();
+        if !data_only {
             let mut l: usize = 0;
             let bcn_frame = if could_be_heartbeat(&line) {
                 pack_heartbeat_message(&line, mycall, Some(&mut l))
             } else {
                 String::new()
             };
+            if l > 0 {
+                frames.push((bcn_frame, ITYPE_JS8CALL));
+                line = line[l..].to_owned();
+                continue;
+            }
 
             let mut o: usize = 0;
             let cmp_frame = if could_be_compound(&line) {
@@ -1776,10 +1600,14 @@ pub fn build_message_frames(
             } else {
                 String::new()
             };
+            if o > 0 {
+                frames.push((cmp_frame, ITYPE_JS8CALL));
+                line = line[o..].to_owned();
+                continue;
+            }
 
             let mut n: usize = 0;
             let mut dir_cmd = String::new();
-            let mut dir_to = String::new();
             let mut dir_num = String::new();
             let mut dir_to_compound = false;
             let dir_frame = if could_be_directed(&line) {
@@ -1795,90 +1623,31 @@ pub fn build_message_frames(
             } else {
                 String::new()
             };
-
-            // ALLOW_FORCE_IDENTIFY
-            let is_likely_data_frame = line_frames.is_empty()
-                && selected_call.is_empty()
-                && dir_to.is_empty()
-                && l == 0
-                && o == 0;
-            if force_identify && is_likely_data_frame && !line.contains(mycall) {
-                line = format!("{mycall}: {line}");
-            }
-
-            let mut m: usize = 0;
-
-            #[cfg(feature = "legacy_pack_data")]
-            let (dat_frame, fast_data_frame) = if submode == Submode::Normal {
-                (pack_data_message(&line, Some(&mut m)), false)
-            } else {
-                (pack_fast_data_message(&line, Some(&mut m)), true)
-            };
-            #[cfg(not(feature = "legacy_pack_data"))]
-            let (dat_frame, fast_data_frame) = {
-                let _ = submode;
-                (pack_fast_data_message(&line, Some(&mut m)), true)
-            };
-
-            if !has_directed && !has_data && l > 0 {
-                use_bcn = true;
-                has_directed = false;
-                frame = bcn_frame;
-            } else if !has_directed && !has_data && o > 0 {
-                use_cmp = true;
-                has_directed = false;
-                frame = cmp_frame;
-            } else if !has_directed && !has_data && n > 0 {
-                use_dir = true;
-                has_directed = true;
-                frame = dir_frame;
-            } else if m > 0 {
-                use_dat = true;
-                has_data = true;
-                frame = dat_frame;
-            }
-
-            if use_bcn {
-                line_frames.push((frame.clone(), ITYPE_JS8CALL));
-                line = mid_bytes(&line, l);
-            }
-
-            if use_cmp {
-                line_frames.push((frame.clone(), ITYPE_JS8CALL));
-                line = mid_bytes(&line, o);
-            }
-
-            if use_dir {
+            if n > 0 {
                 // ALLOW_SEND_COMPOUND_DIRECTED true-path
-                let mut should_use_standard_frame = true;
-
                 if is_compound_call(mycall) || dir_to_compound {
                     // Send a DE compound frame first
                     let de_compound_message = format!("`{mycall} {mygrid}");
                     let de_compound_frame = pack_compound_message(&de_compound_message, None);
                     if !de_compound_frame.is_empty() {
-                        line_frames.push((de_compound_frame, ITYPE_JS8CALL));
+                        frames.push((de_compound_frame, ITYPE_JS8CALL));
                     }
 
                     // Followed by a compound-directed (encoded as compound message) frame
                     let dir_compound_message = format!("`{dir_to}{dir_cmd}{dir_num}");
                     let dir_compound_frame = pack_compound_message(&dir_compound_message, None);
                     if !dir_compound_frame.is_empty() {
-                        line_frames.push((dir_compound_frame, ITYPE_JS8CALL));
+                        frames.push((dir_compound_frame, ITYPE_JS8CALL));
                     }
-
-                    should_use_standard_frame = false;
+                } else {
+                    frames.push((dir_frame, ITYPE_JS8CALL));
                 }
 
-                if should_use_standard_frame {
-                    line_frames.push((frame.clone(), ITYPE_JS8CALL));
-                }
-
-                line = mid_bytes(&line, n);
+                line = line[n..].to_owned();
 
                 // buffered command checksum handling
                 if is_buffered_token(&dir_cmd) && !line.is_empty() {
-                    line = lstrip(&line);
+                    line = line.trim_start().to_owned();
 
                     let skip_aprs_checksum = dir_to.eq_ignore_ascii_case("@APRSIS")
                         && matches!(dir_cmd.as_str(), " MSG" | " MSG TO:");
@@ -1896,38 +1665,52 @@ pub fn build_message_frames(
                         line = format!("{line} {cs}");
                     }
                 }
-
-                if let Some(info) = info_out.as_deref_mut() {
-                    info.dir_cmd = dir_cmd.clone();
-                    info.dir_to = dir_to.clone();
-                    info.dir_num = dir_num.clone();
-                }
+                data_only = true;
+                continue;
             }
 
-            if use_dat {
-                let itype = if fast_data_frame {
-                    ITYPE_JS8CALL_DATA
-                } else {
-                    ITYPE_JS8CALL
-                };
-                line_frames.push((frame, itype));
-                line = mid_bytes(&line, m);
-            }
-
-            if !(use_bcn || use_cmp || use_dir || use_dat) {
-                break;
+            if force_identify
+                && frames.is_empty()
+                && selected_call.is_empty()
+                && dir_to.is_empty()
+                && !line.contains(mycall)
+            {
+                line = format!("{mycall}: {line}");
             }
         }
 
-        if !line_frames.is_empty() {
-            line_frames[0].1 |= ITYPE_JS8CALL_FIRST;
-            let last = line_frames.len() - 1;
-            line_frames[last].1 |= ITYPE_JS8CALL_LAST;
-        }
+        let mut m = 0;
+        #[cfg(feature = "legacy_pack_data")]
+        let (frame, fast) = if submode == Submode::Normal {
+            (pack_data_message(&line, Some(&mut m)), false)
+        } else {
+            (pack_fast_data_message(&line, Some(&mut m)), true)
+        };
+        #[cfg(not(feature = "legacy_pack_data"))]
+        let (frame, fast) = {
+            let _ = submode;
+            (pack_fast_data_message(&line, Some(&mut m)), true)
+        };
 
-        all_frames.extend(line_frames);
+        if m == 0 {
+            break;
+        }
+        let itype = if fast {
+            ITYPE_JS8CALL_DATA
+        } else {
+            ITYPE_JS8CALL
+        };
+        frames.push((frame, itype));
+        line = line[m..].to_owned();
+        data_only = true;
     }
-    all_frames
+
+    if !frames.is_empty() {
+        frames[0].1 |= ITYPE_JS8CALL_FIRST;
+        let last = frames.len() - 1;
+        frames[last].1 |= ITYPE_JS8CALL_LAST;
+    }
+    frames
 }
 
 #[cfg(test)]
@@ -2241,7 +2024,7 @@ mod tests {
 
         for text in ["", "C", "CQ", "CQX", "CQ CQ CQ EM73", "xCQ", "HB", "HBX"] {
             let expected_cq = CQS.entries().any(|(_, value)| text.starts_with(*value));
-            let expected_hb = HBS.entries().any(|(_, value)| text.starts_with(*value));
+            let expected_hb = text.starts_with("HB");
             assert_eq!(starts_with_cq(text), expected_cq, "CQ prefix {text:?}");
             assert_eq!(starts_with_hb(text), expected_hb, "HB prefix {text:?}");
         }
@@ -2285,7 +2068,6 @@ mod tests {
             false,
             false,
             Submode::Fast,
-            None,
         );
         assert!(!frames.is_empty());
 
@@ -2305,7 +2087,6 @@ mod tests {
             false,
             true,
             Submode::Normal,
-            None,
         );
         #[cfg(not(feature = "legacy_pack_data"))]
         assert!(
@@ -2331,7 +2112,6 @@ mod tests {
             false,
             false,
             Submode::Fast,
-            None,
         );
         assert!(!frames.is_empty());
 
@@ -2351,7 +2131,6 @@ mod tests {
             false,
             false,
             Submode::Fast,
-            None,
         );
         let with_prefix = build_message_frames(
             "K1ABC",
@@ -2361,7 +2140,6 @@ mod tests {
             false,
             false,
             Submode::Fast,
-            None,
         );
 
         assert_eq!(with_prefix, without_prefix);
@@ -2369,16 +2147,7 @@ mod tests {
 
     #[test]
     fn build_message_frames_strips_trailing_whitespace() {
-        let clean = build_message_frames(
-            "K1ABC",
-            "EM73",
-            "",
-            "HELLO",
-            false,
-            false,
-            Submode::Fast,
-            None,
-        );
+        let clean = build_message_frames("K1ABC", "EM73", "", "HELLO", false, false, Submode::Fast);
         let spaced = build_message_frames(
             "K1ABC",
             "EM73",
@@ -2387,7 +2156,6 @@ mod tests {
             false,
             false,
             Submode::Fast,
-            None,
         );
         assert_eq!(clean, spaced);
     }
@@ -2402,7 +2170,6 @@ mod tests {
             false,
             false,
             Submode::Normal,
-            None,
         );
 
         assert!(frames.is_empty());
@@ -2418,7 +2185,6 @@ mod tests {
             false,
             false,
             Submode::Normal,
-            None,
         );
         let aprs_cmd = build_message_frames(
             "K1ABC",
@@ -2428,7 +2194,6 @@ mod tests {
             false,
             false,
             Submode::Normal,
-            None,
         );
         let js8net = build_message_frames(
             "K1ABC",
@@ -2438,7 +2203,6 @@ mod tests {
             false,
             false,
             Submode::Normal,
-            None,
         );
 
         let mut aprs_payload = String::new();

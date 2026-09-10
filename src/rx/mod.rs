@@ -10,6 +10,8 @@ use crate::protocol::{DecodeModes, Submode};
 pub mod reassembly;
 /// Decode-window scheduling helpers.
 pub mod scheduling;
+#[cfg(feature = "experimental-time")]
+mod time;
 
 pub use crate::detector::{
     Detector, INPUT_SAMPLE_RATE_HZ, InputFormat, NDOWN as DETECTOR_DECIMATION,
@@ -19,6 +21,8 @@ pub use reassembly::{
     BufferKey, BufferedChecksum, BufferedCommandResult, MessageBufferAssembler, ReassemblyEvent,
 };
 pub use scheduling::{DecodeCursor, DecodeScheduler, DecodeWindow, next_decode_window};
+#[cfg(feature = "experimental-time")]
+pub use time::{UntimedDecoder, UntimedReceiver};
 
 /// Fixed decoder ring-buffer size (`d2` samples at 12 kHz).
 pub const SAMPLE_BUFFER_SIZE: usize = crate::internal::commons::JS8_RX_SAMPLE_SIZE;
@@ -109,6 +113,12 @@ pub struct Decoded {
     pub frequency_hz: f32,
     /// Decoder quality score.
     pub quality: f32,
+    /// Absolute 12 kHz stream position of the detected frame start.
+    ///
+    /// This is populated by [`UntimedDecoder`] and is `None` for slot-based
+    /// decoder passes.
+    #[cfg(feature = "experimental-time")]
+    pub sample_position: Option<u64>,
 }
 
 impl Decoded {
@@ -129,6 +139,8 @@ impl Decoded {
             time_offset_seconds,
             frequency_hz,
             quality,
+            #[cfg(feature = "experimental-time")]
+            sample_position: None,
         }
     }
 

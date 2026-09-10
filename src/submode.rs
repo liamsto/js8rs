@@ -12,12 +12,6 @@ use crate::{
     protocol::Submode,
 };
 
-#[inline]
-const fn floor_f64(v: f64) -> i32 {
-    let i = v as i32;
-    if v < (i as f64) { i - 1 } else { i }
-}
-
 #[derive(Clone, Copy)]
 pub struct Data {
     pub name: &'static str,
@@ -54,9 +48,7 @@ impl Data {
         let samples_per_period = rx_rate * period_s;
         let tone_spacing = (rx_rate as f64) / (samples_for_one_symbol as f64);
 
-        let samples_needed_f = (samples_for_symbols as f64)
-            + (0.5 + (start_delay_ms as f64) / 1000.0) * (rx_rate as f64);
-        let samples_needed = floor_f64(samples_needed_f) as u64;
+        let samples_needed = samples_for_symbols + rx_rate / 2 + start_delay_ms * rx_rate / 1000;
 
         let data_duration = (samples_for_symbols as f64) / (rx_rate as f64);
         let tx_duration = data_duration + (start_delay_ms as f64) / 1000.0;
@@ -78,34 +70,16 @@ impl Data {
             tx_duration,
         }
     }
-
-    const fn new_default_rx_threshold(
-        name: &'static str,
-        samples_for_one_symbol: u64,
-        start_delay_ms: u64,
-        period_s: u64,
-        costas: costas::Type,
-        rx_snr_threshold: i32,
-    ) -> Self {
-        Self::new(
-            name,
-            samples_for_one_symbol,
-            start_delay_ms,
-            period_s,
-            costas,
-            rx_snr_threshold,
-            10,
-        )
-    }
 }
 
-pub const NORMAL: Data = Data::new_default_rx_threshold(
+pub const NORMAL: Data = Data::new(
     "NORMAL",
     commons::JS8A_SYMBOL_SAMPLES,
     commons::JS8A_START_DELAY_MS,
     commons::JS8A_TX_SECONDS,
     costas::Type::Original,
     -24,
+    10,
 );
 
 pub const FAST: Data = Data::new(
@@ -128,13 +102,14 @@ pub const TURBO: Data = Data::new(
     32,
 );
 
-pub const SLOW: Data = Data::new_default_rx_threshold(
+pub const SLOW: Data = Data::new(
     "SLOW",
     commons::JS8E_SYMBOL_SAMPLES,
     commons::JS8E_START_DELAY_MS,
     commons::JS8E_TX_SECONDS,
     costas::Type::Modified,
     -28,
+    10,
 );
 
 pub const ULTRA: Data = Data::new(
@@ -274,26 +249,8 @@ const fn data(submode: Submode) -> &'static Data {
 
 #[cfg(test)]
 mod tests {
-    use super::{FAST, NORMAL, SLOW, Submode, TURBO, ULTRA, floor_f64};
+    use super::{FAST, NORMAL, SLOW, Submode, TURBO, ULTRA};
     use crate::internal::commons::JS8_RX_SAMPLE_SIZE;
-
-    #[test]
-    fn floor_matches_cpp_static_asserts() {
-        assert_eq!(floor_f64(0.0), 0);
-        assert_eq!(floor_f64(0.499_999), 0);
-        assert_eq!(floor_f64(0.5), 0);
-        assert_eq!(floor_f64(0.999_999), 0);
-        assert_eq!(floor_f64(1.0), 1);
-        assert_eq!(floor_f64(123.0), 123);
-        assert_eq!(floor_f64(123.4), 123);
-
-        assert_eq!(floor_f64(-0.499_999), -1);
-        assert_eq!(floor_f64(-0.5), -1);
-        assert_eq!(floor_f64(-0.999_999), -1);
-        assert_eq!(floor_f64(-1.0), -1);
-        assert_eq!(floor_f64(-123.0), -123);
-        assert_eq!(floor_f64(-123.4), -124);
-    }
 
     #[test]
     fn submode_constants_match_js8_values() {

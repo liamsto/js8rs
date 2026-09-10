@@ -129,12 +129,7 @@ impl DecodedFrame {
             msg.push_str(&varicode::cq_string(bits3.into()));
         } else {
             msg.push_str("@HB ");
-            let sbits3 = varicode::hb_string(bits3.into());
-            if sbits3 == "HB" {
-                msg.push_str("HEARTBEAT");
-            } else {
-                msg.push_str(&sbits3);
-            }
+            msg.push_str("HEARTBEAT");
         }
 
         msg.push(' ');

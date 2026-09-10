@@ -6,23 +6,7 @@ use js8rs::codec::{BuildFramesOptions, build_frames, encode_tones};
 use js8rs::protocol::{DecodeModes, Submode};
 use js8rs::rx::{DecodeConfig, Decoder, Detector, Event, InputFormat};
 use js8rs::tx::{Channel, Modulator};
-use std::sync::OnceLock;
 use std::time::Duration;
-use tracing::info;
-
-static TRACING: OnceLock<()> = OnceLock::new();
-
-fn init_tracing() {
-    TRACING.get_or_init(|| {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::from_default_env()
-                    .add_directive("info".parse().unwrap()),
-            )
-            .with_test_writer()
-            .try_init();
-    });
-}
 
 #[test]
 fn roundtrip_normal() -> Result<()> {
@@ -50,17 +34,11 @@ fn roundtrip_ultra() -> Result<()> {
 }
 
 fn run_roundtrip(submode: Submode, decode_mode: DecodeModes) -> Result<()> {
-    init_tracing();
-
     let original_message = "HELLO WORLD".to_string();
 
     let built = build_frames(&BuildFramesOptions::new(&original_message, submode));
     if built.frames.is_empty() {
         bail!("build_frames returned no frames");
-    }
-
-    for frame in &built.frames {
-        info!("Packed message: {}", frame.encoded)
     }
 
     let mut decoder = Decoder::with_modes(decode_mode);
@@ -87,7 +65,6 @@ fn run_roundtrip(submode: Submode, decode_mode: DecodeModes) -> Result<()> {
         })?;
 
         decoded_fragments.push(decoded.frame.message.clone());
-        info!("{}", decoded.log_line())
     }
 
     let reconstructed = decoded_fragments.concat();
@@ -99,8 +76,6 @@ fn run_roundtrip(submode: Submode, decode_mode: DecodeModes) -> Result<()> {
             "unpacked message mismatch:\n  expected: {original_message:?}\n  got:      {reconstructed:?}"
         );
     }
-
-    info!("Unpacked message: {}", reconstructed_norm);
 
     Ok(())
 }
