@@ -156,7 +156,8 @@ impl Modulator {
         self.open = false;
     }
 
-    /// Starts modulation of an encoded frame using standard JS8 timing data.
+    /// Starts modulation using JS8 timing, or immediately with `experimental-time`.
+    /// With that feature, `now_unix_ms` and `tx_delay` are ignored.
     pub fn start(
         &mut self,
         frame: &EncodedFrame,
@@ -175,16 +176,8 @@ impl Modulator {
         );
     }
 
-    /// Starts an encoded frame immediately, without UTC slot alignment.
-    ///
-    /// The waveform remains JS8-compatible; only its start time is independent
-    /// of the normal submode slot.
-    #[cfg(feature = "experimental-time")]
-    pub fn start_immediate(&mut self, frame: &EncodedFrame, frequency_hz: f64, channel: Channel) {
-        self.start_tones_immediate(&frame.tones, frame.submode, frequency_hz, channel);
-    }
-
-    /// Starts fixed tones using standard JS8 timing data.
+    /// Starts fixed tones using JS8 timing, or immediately with `experimental-time`.
+    /// With that feature, `now_unix_ms` and `tx_delay` are ignored.
     pub fn start_tones(
         &mut self,
         tones: &[u8; TONES_PER_FRAME],
@@ -192,56 +185,6 @@ impl Modulator {
         now_unix_ms: u64,
         frequency_hz: f64,
         tx_delay: Duration,
-        channel: Channel,
-    ) {
-        self.prepare(tones, submode, frequency_hz, channel);
-
-        if !self.m_tuning {
-            // Timing alignment to submode period and nominal start delay.
-            let period_ms = submode.period_seconds() * MS_PER_SEC_U64;
-            let start_delay_ms = submode.start_delay_ms();
-
-            let period_offset_ms = now_unix_ms % period_ms;
-
-            let tx_delay_ms = tx_delay.as_millis().min(u128::from(u64::MAX)) as u64;
-
-            let in_tx_delay_before_period_start =
-                period_ms <= period_offset_ms.saturating_add(tx_delay_ms);
-
-            if in_tx_delay_before_period_start {
-                let additional_ms_needed_for_tx_delay = period_ms.saturating_sub(period_offset_ms);
-                let total_ms = start_delay_ms.saturating_add(additional_ms_needed_for_tx_delay);
-                self.m_silent_frames = (total_ms * FRAME_RATE_U64) / MS_PER_SEC_U64;
-            } else if start_delay_ms > period_offset_ms {
-                let total_ms = start_delay_ms - period_offset_ms;
-                self.m_silent_frames = (total_ms * FRAME_RATE_U64) / MS_PER_SEC_U64;
-            } else {
-                let late_ms = period_offset_ms - start_delay_ms;
-                self.m_ic = ((late_ms * FRAME_RATE_U64) / MS_PER_SEC_U64) as u32;
-            }
-        }
-
-        self.finish_start();
-    }
-
-    /// Starts fixed tones immediately, without UTC slot alignment.
-    #[cfg(feature = "experimental-time")]
-    pub fn start_tones_immediate(
-        &mut self,
-        tones: &[u8; TONES_PER_FRAME],
-        submode: Submode,
-        frequency_hz: f64,
-        channel: Channel,
-    ) {
-        self.prepare(tones, submode, frequency_hz, channel);
-        self.finish_start();
-    }
-
-    fn prepare(
-        &mut self,
-        tones: &[u8; TONES_PER_FRAME],
-        submode: Submode,
-        frequency_hz: f64,
         channel: Channel,
     ) {
         if self.state_load() != State::Idle {
@@ -267,9 +210,32 @@ impl Modulator {
 
         self.channel = channel;
         self.open = true;
-    }
 
-    fn finish_start(&self) {
+        if !cfg!(feature = "experimental-time") && !self.m_tuning {
+            // Timing alignment to submode period and nominal start delay.
+            let period_ms = submode.period_seconds() * MS_PER_SEC_U64;
+            let start_delay_ms = submode.start_delay_ms();
+
+            let period_offset_ms = now_unix_ms % period_ms;
+
+            let tx_delay_ms = tx_delay.as_millis().min(u128::from(u64::MAX)) as u64;
+
+            let in_tx_delay_before_period_start =
+                period_ms <= period_offset_ms.saturating_add(tx_delay_ms);
+
+            if in_tx_delay_before_period_start {
+                let additional_ms_needed_for_tx_delay = period_ms.saturating_sub(period_offset_ms);
+                let total_ms = start_delay_ms.saturating_add(additional_ms_needed_for_tx_delay);
+                self.m_silent_frames = (total_ms * FRAME_RATE_U64) / MS_PER_SEC_U64;
+            } else if start_delay_ms > period_offset_ms {
+                let total_ms = start_delay_ms - period_offset_ms;
+                self.m_silent_frames = (total_ms * FRAME_RATE_U64) / MS_PER_SEC_U64;
+            } else {
+                let late_ms = period_offset_ms - start_delay_ms;
+                self.m_ic = ((late_ms * FRAME_RATE_U64) / MS_PER_SEC_U64) as u32;
+            }
+        }
+
         if self.m_silent_frames > 0 {
             self.state_store(State::Synchronizing);
         } else {
@@ -481,7 +447,14 @@ mod tests {
             Duration::ZERO,
             Channel::Mono,
         );
-        assert_eq!(modulator.state(), State::Synchronizing);
+        assert_eq!(
+            modulator.state(),
+            if cfg!(feature = "experimental-time") {
+                State::Active
+            } else {
+                State::Synchronizing
+            }
+        );
     }
 
     #[test]

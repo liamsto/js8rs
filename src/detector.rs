@@ -91,13 +91,13 @@ pub struct WriteStats {
     pub frames_in: usize,
     /// Input frames accepted (others are dropped).
     pub frames_accepted: usize,
-    /// Input frames dropped because the 12 kHz ring buffer is full until next period.
+    /// Input frames dropped because the buffer is full (zero with `experimental-time`).
     pub frames_dropped: usize,
     /// Number of 12 kHz blocks written (each block = `samples_per_fft` output samples).
     pub blocks_written: usize,
     /// `kin` after the write.
     pub kin_after: usize,
-    /// Current second within the configured period.
+    /// Current second within the configured period; sample-based with `experimental-time`.
     pub second_in_period: u64,
 }
 
@@ -106,6 +106,9 @@ pub struct WriteStats {
 /// - lowpass+decimates to 12 kHz,
 /// - fills `d2` (length `JS8_RX_SAMPLE_SIZE`) and advances `kin`,
 /// - resets `kin` to 0 on period wrap (like original).
+///
+/// With `experimental-time`, audio wraps continuously in the buffer and `kin`
+/// counts all 12 kHz samples since reset, independently of the wall clock.
 pub struct Detector {
     period_s: u64,
     inner: Mutex<Inner>,
@@ -113,8 +116,8 @@ pub struct Detector {
 
 struct Inner {
     samples_per_fft: usize,
-    d2: Vec<i16>, // 12 kHz ring buffer (actually linear within a period, reset to 0 on wrap)
-    kin: usize,   // number of 12 kHz samples written so far in current period
+    d2: Vec<i16>, // Linear within a period, or a continuous ring with experimental-time.
+    kin: usize,   // Samples written in this period, or since reset with experimental-time.
     buffer_pos: usize, // position in the 48 kHz staging buffer
     ns: u64,      // last secondInPeriod observed
     buffer: Vec<i16>, // 48 kHz mono staging buffer, length = samples_per_fft * NDOWN
@@ -131,7 +134,7 @@ impl Detector {
             d2: vec![0i16; JS8_RX_SAMPLE_SIZE],
             kin: 0,
             buffer_pos: 0,
-            ns: second_in_period(period_s),
+            ns: 0,
             buffer: vec![0i16; samples_per_fft * NDOWN],
             filter: FirDecimator49x4::new(LOWPASS),
         };
@@ -158,6 +161,8 @@ impl Detector {
     /// - align `kin` to wall clock within the period,
     /// - rotate existing content to preserve time alignment,
     /// - then zero-fill.
+    ///
+    /// With `experimental-time`, resets the sample count and decimator instead.
     pub fn clear(&self) {
         let mut g = self.inner.lock().unwrap();
         reset_buffer_position_locked(self.period_s, &mut g);
@@ -165,6 +170,7 @@ impl Detector {
     }
 
     /// Align `kin` to “now” inside the period and rotate `d2` to preserve alignment.
+    /// With `experimental-time`, resets the sample count and decimator instead.
     pub fn reset_buffer_position(&self) {
         let mut g = self.inner.lock().unwrap();
         reset_buffer_position_locked(self.period_s, &mut g);
@@ -177,6 +183,7 @@ impl Detector {
     }
 
     /// Current `kin` (12 kHz samples written in this period).
+    /// With `experimental-time`, counts all samples since reset and can exceed the buffer size.
     pub fn kin(&self) -> usize {
         self.inner.lock().unwrap().kin
     }
@@ -208,8 +215,12 @@ impl Detector {
     pub fn write_i16(&self, data: &[i16], fmt: InputFormat) -> WriteStats {
         let mut g = self.inner.lock().unwrap();
 
-        let ns = second_in_period(self.period_s);
-        if ns < g.ns {
+        let ns = if cfg!(feature = "experimental-time") {
+            (g.kin as u64 / u64::from(OUTPUT_SAMPLE_RATE_HZ)) % self.period_s.max(1)
+        } else {
+            second_in_period(self.period_s)
+        };
+        if !cfg!(feature = "experimental-time") && ns < g.ns {
             g.kin = 0;
             g.buffer_pos = 0;
         }
@@ -223,7 +234,11 @@ impl Detector {
         let remaining_12k = JS8_RX_SAMPLE_SIZE.saturating_sub(g.kin);
         let frames_acceptable = remaining_12k * NDOWN;
 
-        let frames_accepted = frames_in.min(frames_acceptable);
+        let frames_accepted = if cfg!(feature = "experimental-time") {
+            frames_in
+        } else {
+            frames_in.min(frames_acceptable)
+        };
         let frames_dropped = frames_in - frames_accepted;
 
         let mut blocks_written = 0usize;
@@ -258,7 +273,9 @@ impl Detector {
             g.buffer_pos += num;
 
             if g.buffer_pos == g.samples_per_fft * NDOWN {
-                if g.kin < JS8_RX_SAMPLE_SIZE.saturating_sub(g.samples_per_fft) {
+                if cfg!(feature = "experimental-time")
+                    || g.kin < JS8_RX_SAMPLE_SIZE.saturating_sub(g.samples_per_fft)
+                {
                     for i in 0..g.samples_per_fft {
                         let base = i * NDOWN;
                         let group = [
@@ -268,7 +285,11 @@ impl Detector {
                             g.buffer[base + 3],
                         ];
                         let out = g.filter.down_sample_i16(group);
-                        let k = g.kin;
+                        let k = if cfg!(feature = "experimental-time") {
+                            g.kin % JS8_RX_SAMPLE_SIZE
+                        } else {
+                            g.kin
+                        };
                         g.d2[k] = out;
                         g.kin += 1;
                     }
@@ -293,6 +314,14 @@ impl Detector {
 }
 
 fn reset_buffer_position_locked(period_s: u64, g: &mut Inner) {
+    if cfg!(feature = "experimental-time") {
+        g.kin = 0;
+        g.buffer_pos = 0;
+        g.ns = 0;
+        g.filter = FirDecimator49x4::new(LOWPASS);
+        return;
+    }
+
     let now_ms = unix_time_ms();
     let ms_in_day = now_ms % 86_400_000u64;
     let ms_in_period = ms_in_day % (period_s * 1000u64);
@@ -446,6 +475,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "experimental-time"))]
     fn drops_frames_when_near_capacity() {
         let detector = Detector::new(1, 32);
         {
@@ -463,6 +493,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "experimental-time"))]
     fn wrap_resets_kin_when_period_rolls_over() {
         let detector = Detector::new(1, 64);
         {
@@ -474,5 +505,26 @@ mod tests {
         let input = vec![0i16; 64 * NDOWN];
         let stats = detector.write_i16(&input, InputFormat::Mono);
         assert!(stats.kin_after <= 64);
+    }
+
+    #[test]
+    #[cfg(feature = "experimental-time")]
+    fn continuous_ring_ignores_clock_wrap_and_resets() {
+        let detector = Detector::new(1, 64);
+        detector.inner.lock().unwrap().ns = u64::MAX;
+        let input = vec![100; (JS8_RX_SAMPLE_SIZE + 128) * NDOWN];
+        let stats = detector.write_i16(&input, InputFormat::Mono);
+        assert_eq!(stats.frames_accepted, input.len());
+        assert_eq!(stats.frames_dropped, 0);
+        assert_eq!(stats.kin_after, JS8_RX_SAMPLE_SIZE + 128);
+        detector.with_samples(|samples, kin| {
+            assert_eq!(kin, stats.kin_after);
+            assert!(samples[..128].iter().all(|&sample| sample > 0));
+        });
+        detector.clear();
+        detector.with_samples(|samples, kin| {
+            assert_eq!(kin, 0);
+            assert!(samples.iter().all(|&sample| sample == 0));
+        });
     }
 }

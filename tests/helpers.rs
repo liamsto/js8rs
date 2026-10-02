@@ -4,9 +4,9 @@
 use anyhow::Result;
 use js8rs::codec::{BuildFramesOptions, EncodeError, build_frames, encode_tones, parse_frame};
 use js8rs::protocol::Submode;
-use js8rs::rx::{
-    DecodeCursor, MessageBufferAssembler, ReassemblyEvent, next_decode_window, window_from_kin,
-};
+#[cfg(not(feature = "experimental-time"))]
+use js8rs::rx::{DecodeCursor, next_decode_window};
+use js8rs::rx::{MessageBufferAssembler, ReassemblyEvent, window_from_kin};
 
 fn frame_to_12_bytes(frame: &str) -> [u8; 12] {
     let bytes = frame.as_bytes();
@@ -58,6 +58,7 @@ fn decode_window_clamps_each_selected_mode_span() {
 }
 
 #[test]
+#[cfg(not(feature = "experimental-time"))]
 fn decode_scheduler_emits_windows_when_ready() {
     let mut cursor = DecodeCursor::new();
 
@@ -86,6 +87,7 @@ fn buffered_command_reassembler_completes_and_strips_checksum() {
     for frame in built.frames {
         let parsed = parse_frame(&frame.encoded, frame.flags, Submode::Normal);
         let decoded = js8rs::rx::Decoded::new(parsed, 0, 0, 0.0, 1500.0, 1.0);
+        assert_eq!(decoded.sample_position, None);
         if let Some(ReassemblyEvent::Completed(done)) = assembler.push_decoded(&decoded) {
             completed = Some(done);
         }

@@ -86,9 +86,10 @@ pub struct TransmitSlot {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimingParams {
-    /// `JS8Call` `time_is_in_tx_delay`.
+    /// `JS8Call` `time_is_in_tx_delay`; always false with `experimental-time`.
     pub in_tx_delay_window: bool,
     /// Equivalent to `(0 <= seconds_into_slot && seconds_into_slot < tx_duration)`.
+    /// Always true with `experimental-time`.
     pub in_tx_payload_window: bool,
     /// Equivalent to `JS8Call` `m_timeToSend` excluding "tune":
     /// `in_tx_payload_window || in_tx_delay_window`.
@@ -163,16 +164,20 @@ pub fn compute_slot(submode: Submode, now_unix_ms: u64, config: TxTimingConfig) 
 impl TransmitSlot {
     #[must_use]
     /// Derives boolean start and payload-window conditions.
+    /// With `experimental-time`, the send region and start gate are always open.
     pub const fn params(&self) -> TimingParams {
-        let in_tx_delay_window = self.now_unix_ms >= self.tx_delay_window_start_ms;
+        let in_tx_delay_window = !cfg!(feature = "experimental-time")
+            && self.now_unix_ms >= self.tx_delay_window_start_ms;
 
-        let in_tx_payload_window = self.seconds_into_slot < self.tx_duration_seconds;
+        let in_tx_payload_window = cfg!(feature = "experimental-time")
+            || self.seconds_into_slot < self.tx_duration_seconds;
 
         let time_is_in_send_region = in_tx_payload_window || in_tx_delay_window;
 
         // Equivalent to: fraction < lateThreshold OR in_tx_delay_window
-        let allowed_to_start_now =
-            (self.fraction_into_slot < self.late_threshold_fraction) || in_tx_delay_window;
+        let allowed_to_start_now = cfg!(feature = "experimental-time")
+            || (self.fraction_into_slot < self.late_threshold_fraction)
+            || in_tx_delay_window;
 
         let too_late_to_start = !allowed_to_start_now;
 
@@ -245,6 +250,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "experimental-time"))]
     fn tx_delay_window_and_late_gate_behave_as_expected() {
         // period=15s, tx_duration=12.6s, tx_delay=2s, late threshold=(1 - 2/15) = 0.866...
         let cfg = TxTimingConfig::new(Duration::from_secs(2), Duration::from_secs(15));
@@ -269,6 +275,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "experimental-time"))]
     fn next_viable_start_moves_to_next_slot_when_too_late() {
         let cfg = TxTimingConfig::new(Duration::ZERO, Duration::from_secs(15));
         let slot_ok = compute_slot(Submode::Normal, 14_000, cfg);
@@ -278,5 +285,29 @@ mod tests {
         let late_slot = compute_slot(Submode::Normal, 6_000, late_cfg);
         assert!(late_slot.params().too_late_to_start);
         assert_eq!(late_slot.next_viable_start_ms(), late_slot.slot_end_ms);
+    }
+
+    #[test]
+    #[cfg(feature = "experimental-time")]
+    fn every_slot_position_allows_tx() {
+        for mode in [
+            Submode::Normal,
+            Submode::Fast,
+            Submode::Turbo,
+            Submode::Slow,
+            Submode::Ultra,
+        ] {
+            let cfg = TxTimingConfig::for_submode(Duration::from_secs(2), mode);
+            for now in 0..mode.period_seconds() * 1000 {
+                let slot = compute_slot(mode, now, cfg);
+                assert!(slot.should_start_tx_now(false, 1));
+                assert!(!slot.should_start_tx_now(true, 1));
+                assert!(!slot.should_start_tx_now(false, 0));
+                assert_eq!(slot.next_viable_start_ms(), now);
+                assert!(!slot.params().too_late_to_start);
+                assert!(!slot.params().in_tx_delay_window);
+                assert!(slot.params().in_tx_payload_window);
+            }
+        }
     }
 }

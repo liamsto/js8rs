@@ -3,7 +3,9 @@
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use js8rs::protocol::{DecodeModes, Submode};
-use js8rs::rx::{DecodeConfig, Event, InputFormat, UntimedDecoder, UntimedReceiver};
+use js8rs::rx::{
+    DecodeConfig, DecodeScheduler, Decoder, Detector, Event, InputFormat, SAMPLE_BUFFER_SIZE,
+};
 use std::hint::black_box;
 
 mod support;
@@ -19,12 +21,16 @@ fn bench_signal(c: &mut Criterion) {
 
     c.bench_function("untimed_fast_signal", |b| {
         b.iter_batched(
-            || UntimedDecoder::with_modes(DecodeModes::FAST),
+            || Decoder::with_modes(DecodeModes::FAST),
             |mut decoder| {
-                let decoded =
-                    decoder.push(black_box(&samples), black_box(&config), |event: Event| {
+                let decoded = decoder.decode(
+                    black_box(&samples),
+                    samples.len(),
+                    black_box(&config),
+                    |event: Event| {
                         black_box(event);
-                    });
+                    },
+                );
                 black_box(decoded);
             },
             BatchSize::PerIteration,
@@ -36,16 +42,22 @@ fn bench_idle_scans(c: &mut Criterion) {
     let config = DecodeConfig::default()
         .with_modes(DecodeModes::FAST)
         .with_frequency_range(200, 3_000);
-    let mut decoder = UntimedDecoder::with_modes(DecodeModes::FAST);
-    let initial = vec![0; Submode::Fast.samples_per_period()];
-    let samples = vec![0; FAST_STRIDE];
-    decoder.push(&initial, &config, |_| {});
+    let mut decoder = Decoder::with_modes(DecodeModes::FAST);
+    let samples = vec![0; SAMPLE_BUFFER_SIZE];
+    let mut kin = Submode::Fast.samples_per_period();
+    decoder.decode(&samples, kin, &config, |_| {});
 
     c.bench_function("untimed_fast_idle_scan", |b| {
         b.iter(|| {
-            let decoded = decoder.push(black_box(&samples), black_box(&config), |event: Event| {
-                black_box(event);
-            });
+            kin += FAST_STRIDE;
+            let decoded = decoder.decode(
+                black_box(&samples),
+                kin,
+                black_box(&config),
+                |event: Event| {
+                    black_box(event);
+                },
+            );
             black_box(decoded);
         });
     });
@@ -66,16 +78,22 @@ fn bench_noise_scans(c: &mut Criterion) {
     let config = DecodeConfig::default()
         .with_modes(DecodeModes::FAST)
         .with_frequency_range(200, 3_000);
-    let mut decoder = UntimedDecoder::with_modes(DecodeModes::FAST);
-    let initial = noise(Submode::Fast.samples_per_period(), 0x1234_5678_9abc_def0);
-    let samples = noise(FAST_STRIDE, 0xfedc_ba98_7654_3210);
-    decoder.push(&initial, &config, |_| {});
+    let mut decoder = Decoder::with_modes(DecodeModes::FAST);
+    let samples = noise(SAMPLE_BUFFER_SIZE, 0x1234_5678_9abc_def0);
+    let mut kin = Submode::Fast.samples_per_period();
+    decoder.decode(&samples, kin, &config, |_| {});
 
     c.bench_function("untimed_fast_noise_scan", |b| {
         b.iter(|| {
-            let decoded = decoder.push(black_box(&samples), black_box(&config), |event: Event| {
-                black_box(event);
-            });
+            kin += FAST_STRIDE;
+            let decoded = decoder.decode(
+                black_box(&samples),
+                kin,
+                black_box(&config),
+                |event: Event| {
+                    black_box(event);
+                },
+            );
             black_box(decoded);
         });
     });
@@ -85,21 +103,36 @@ fn bench_slow_period(c: &mut Criterion) {
     let config = DecodeConfig::default()
         .with_modes(DecodeModes::SLOW)
         .with_frequency_range(200, 3_000);
-    let samples = vec![0; Submode::Slow.samples_per_period()];
+    let samples = vec![0; SAMPLE_BUFFER_SIZE];
 
     c.bench_function("untimed_slow_idle_30s", |b| {
         b.iter_batched(
             || {
-                let mut decoder = UntimedDecoder::with_modes(DecodeModes::SLOW);
-                decoder.push(&samples, &config, |_| {});
+                let mut decoder = Decoder::with_modes(DecodeModes::SLOW);
+                decoder.decode(
+                    &samples,
+                    Submode::Slow.samples_per_period(),
+                    &config,
+                    |_| {},
+                );
                 decoder
             },
             |mut decoder| {
-                let decoded =
-                    decoder.push(black_box(&samples), black_box(&config), |event: Event| {
-                        black_box(event);
-                    });
-                black_box(decoded);
+                let mut scheduler = DecodeScheduler::new();
+                let period = Submode::Slow.samples_per_period();
+                scheduler.next_window(Submode::Slow, period, 0);
+                for kin in (period + 1..=period * 2).step_by(256) {
+                    if let Some(window) = scheduler.next_window(Submode::Slow, kin, kin - 1) {
+                        black_box(decoder.decode(
+                            black_box(&samples),
+                            window.start + window.size,
+                            black_box(&config),
+                            |event: Event| {
+                                black_box(event);
+                            },
+                        ));
+                    }
+                }
             },
             BatchSize::PerIteration,
         );
@@ -107,21 +140,12 @@ fn bench_slow_period(c: &mut Criterion) {
 }
 
 fn bench_decimator(c: &mut Criterion) {
-    let config = DecodeConfig::default().with_modes(DecodeModes::NONE);
     let samples = vec![0i16; 48_000];
-    let mut receiver = UntimedReceiver::with_modes(DecodeModes::NONE);
+    let detector = Detector::new(60, 64);
 
     c.bench_function("untimed_decimate_48k_mono", |b| {
         b.iter(|| {
-            let decoded = receiver.write_i16(
-                black_box(&samples),
-                InputFormat::Mono,
-                black_box(&config),
-                |event: Event| {
-                    black_box(event);
-                },
-            );
-            black_box(decoded);
+            black_box(detector.write_i16(black_box(&samples), InputFormat::Mono));
         });
     });
 }

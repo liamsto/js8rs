@@ -7,6 +7,8 @@
 
 //! Helpers for selecting decoder sample windows.
 
+#[cfg(feature = "experimental-time")]
+use crate::internal::commons::JS8_RX_SAMPLE_RATE;
 use crate::protocol::Submode;
 
 /// Per-submode cursor used to avoid duplicate decode windows.
@@ -34,64 +36,107 @@ impl DecodeCursor {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodeWindow {
-    /// Receive cycle number.
+    /// Receive cycle number, or overlapping scan number with `experimental-time`.
     pub cycle: usize,
     /// First sample in the decoder ring.
+    /// With `experimental-time`, this is an absolute stream position.
     pub start: usize,
     /// Number of samples to decode.
     pub size: usize,
 }
 
 /// Returns the next ready window and advances `cursor`.
+/// With `experimental-time`, `k` and `k0` are total sample counts since reset,
+/// and windows overlap without regard to UTC slots.
 pub fn next_decode_window(
     submode: Submode,
     k: usize,
     k0: usize,
     cursor: &mut DecodeCursor,
 ) -> Option<DecodeWindow> {
-    let cycle_frames = submode.samples_per_period();
-    let frames_needed = submode.samples_needed() as usize;
-    let current_cycle = submode.compute_cycle_for_decode(k);
-    let delta = k.abs_diff(k0);
-
-    if cycle_frames == 0 {
-        return None;
-    }
-
-    let current_start = cursor.current_start.unwrap_or(0);
-    let dead_air = k < current_start
-        && k < current_start
-            .saturating_sub(cycle_frames)
-            .saturating_add(frames_needed);
-
-    if dead_air
-        || k < k0
-        || delta > cycle_frames
-        || cursor.current_start.is_none()
-        || cursor.next_start.is_none()
+    #[cfg(feature = "experimental-time")]
     {
-        let start = current_cycle * cycle_frames;
+        let size = submode.samples_per_period();
+        if k < k0 {
+            *cursor = DecodeCursor::new();
+        }
+        let stride = scan_stride(submode);
+        let start = k.checked_sub(size)? / stride * stride;
+        if cursor.next_start.is_some_and(|next| start < next) {
+            return None;
+        }
         cursor.current_start = Some(start);
-        cursor.next_start = Some(start + cycle_frames);
+        cursor.next_start = Some(start + stride);
+        Some(DecodeWindow {
+            cycle: start / stride,
+            start,
+            size,
+        })
     }
+    #[cfg(not(feature = "experimental-time"))]
+    {
+        let cycle_frames = submode.samples_per_period();
+        let frames_needed = submode.samples_needed() as usize;
+        let current_cycle = submode.compute_cycle_for_decode(k);
+        let delta = k.abs_diff(k0);
 
-    let current_start = cursor.current_start.unwrap_or(current_start);
-    let next_start = cursor.next_start.unwrap_or(current_start + cycle_frames);
-    let ready = current_start + frames_needed <= k;
-    if !ready {
-        return None;
+        if cycle_frames == 0 {
+            return None;
+        }
+
+        let current_start = cursor.current_start.unwrap_or(0);
+        let dead_air = k < current_start
+            && k < current_start
+                .saturating_sub(cycle_frames)
+                .saturating_add(frames_needed);
+
+        if dead_air
+            || k < k0
+            || delta > cycle_frames
+            || cursor.current_start.is_none()
+            || cursor.next_start.is_none()
+        {
+            let start = current_cycle * cycle_frames;
+            cursor.current_start = Some(start);
+            cursor.next_start = Some(start + cycle_frames);
+        }
+
+        let current_start = cursor.current_start.unwrap_or(current_start);
+        let next_start = cursor.next_start.unwrap_or(current_start + cycle_frames);
+        let ready = current_start + frames_needed <= k;
+        if !ready {
+            return None;
+        }
+
+        let window = DecodeWindow {
+            cycle: current_cycle,
+            start: current_start,
+            size: frames_needed.max(k - current_start),
+        };
+
+        cursor.current_start = Some(next_start);
+        cursor.next_start = Some(next_start + cycle_frames);
+
+        Some(window)
     }
+}
 
-    let window = DecodeWindow {
-        cycle: current_cycle,
-        start: current_start,
-        size: frames_needed.max(k - current_start),
+#[cfg(feature = "experimental-time")]
+const fn scan_stride(mode: Submode) -> usize {
+    let slack = mode.samples_per_period() - mode.samples_for_symbols() as usize;
+    let guard = mode.samples_for_one_symbol() as usize;
+    let stride = slack.saturating_sub(guard);
+    // Slow mode's sync search reaches only three seconds beyond a window start.
+    let limit = match mode {
+        Submode::Slow => {
+            let step = mode.samples_for_one_symbol() as usize / 4;
+            let limit = 3 * JS8_RX_SAMPLE_RATE as usize;
+            limit - limit % step
+        }
+        _ => usize::MAX,
     };
-
-    cursor.current_start = Some(next_start);
-    cursor.next_start = Some(next_start + cycle_frames);
-
-    Some(window)
+    let stride = if stride < limit { stride } else { limit };
+    if stride == 0 { 1 } else { stride }
 }
 
 /// Independent decode cursors for every supported submode.
@@ -140,7 +185,7 @@ impl DecodeScheduler {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "experimental-time")))]
 mod tests {
     use super::*;
     #[test]
@@ -203,5 +248,35 @@ mod tests {
         assert!(n.is_some());
         assert!(f.is_some());
         assert_ne!(n.unwrap().start, f.unwrap().start);
+    }
+}
+
+#[cfg(all(test, feature = "experimental-time"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlapping_windows_cover_frame_slack_and_reset() {
+        for mode in [
+            Submode::Normal,
+            Submode::Fast,
+            Submode::Turbo,
+            Submode::Slow,
+            Submode::Ultra,
+        ] {
+            let period = mode.samples_per_period();
+            let stride = scan_stride(mode);
+            assert!(stride < period - mode.samples_for_symbols() as usize);
+            let mut cursor = DecodeCursor::new();
+            assert!(next_decode_window(mode, period - 1, 0, &mut cursor).is_none());
+            let first = next_decode_window(mode, period, period - 1, &mut cursor).unwrap();
+            assert_eq!((first.start, first.size), (0, period));
+            assert!(next_decode_window(mode, period + stride - 1, period, &mut cursor).is_none());
+            let second = next_decode_window(mode, period + stride, period, &mut cursor).unwrap();
+            assert_eq!((second.start, second.size), (stride, period));
+            let reset = next_decode_window(mode, period, period + stride, &mut cursor).unwrap();
+            assert_eq!(reset.start, 0);
+        }
+        assert_eq!(scan_stride(Submode::Slow), 35_520);
     }
 }

@@ -5,25 +5,52 @@
 
 use js8rs::codec::{BuildFramesOptions, build_frames};
 use js8rs::protocol::{DecodeModes, Submode};
-use js8rs::rx::{DecodeConfig, Event, InputFormat, SAMPLE_BUFFER_SIZE, UntimedReceiver};
+use js8rs::rx::{
+    DecodeConfig, DecodeScheduler, Decoder, Detector, Event, InputFormat, SAMPLE_BUFFER_SIZE,
+};
 use js8rs::tx::{Channel, Modulator, State};
+use std::time::Duration;
 
 const OFFSET_48K: usize = 64_176;
 
 #[test]
-fn immediate_transmission_ignores_slot_position() {
-    let frame = build_frames(&BuildFramesOptions::new("HELLO", Submode::Fast))
-        .encode()
-        .unwrap()
-        .remove(0);
-    let mut modulator = Modulator::new();
-
-    modulator.start_immediate(&frame, 1500.0, Channel::Mono);
-
-    assert_eq!(modulator.state(), State::Active);
-    let mut out = [0; 512];
-    assert_eq!(modulator.render_stereo(&mut out), out.len() / 2);
-    assert!(out.iter().any(|&sample| sample != 0));
+fn ignores_pos() {
+    for mode in [
+        Submode::Normal,
+        Submode::Fast,
+        Submode::Turbo,
+        Submode::Slow,
+        Submode::Ultra,
+    ] {
+        let frame = build_frames(&BuildFramesOptions::new("HELLO", mode))
+            .encode()
+            .unwrap()
+            .remove(0);
+        let mut start = Modulator::new();
+        let mut late = Modulator::new();
+        start.start(&frame, 0, 1500.0, Duration::ZERO, Channel::Mono);
+        late.start_tones(
+            &frame.tones,
+            mode,
+            u64::MAX,
+            1500.0,
+            Duration::from_secs(2),
+            Channel::Mono,
+        );
+        assert_eq!(start.state(), State::Active);
+        assert_eq!(late.state(), State::Active);
+        let mut expected = [0; 2048];
+        let mut actual = [0; 2048];
+        let mut nonzero = false;
+        while !start.is_idle() {
+            let count = start.render_stereo(&mut expected);
+            assert_eq!(late.render_stereo(&mut actual), count);
+            assert_eq!(actual[..count * 2], expected[..count * 2]);
+            nonzero |= actual[..count * 2].iter().any(|&sample| sample != 0);
+        }
+        assert!(nonzero);
+        assert!(late.is_idle());
+    }
 }
 
 #[test]
@@ -64,24 +91,39 @@ fn transmission_crossing_the_sample_ring_roundtrips() {
         .encode()
         .unwrap()
         .remove(0);
-    let mut receiver = UntimedReceiver::with_modes(modes);
+    let detector = Detector::new(60, 64);
+    let mut decoder = Decoder::with_modes(modes);
+    let mut scheduler = DecodeScheduler::new();
     let silence = [0i16; 4_096];
     let start = SAMPLE_BUFFER_SIZE - 20_000;
 
     let mut remaining = start * 4;
     while remaining != 0 {
         let count = remaining.min(silence.len());
-        receiver.write_i16(&silence[..count], InputFormat::Mono, &disabled, |_| {});
+        receive(
+            &detector,
+            &mut decoder,
+            &mut scheduler,
+            mode,
+            &silence[..count],
+            InputFormat::Mono,
+            &disabled,
+            |_| {},
+        );
         remaining -= count;
     }
 
     let mut decoded = None;
     let mut modulator = Modulator::new();
-    modulator.start_immediate(&encoded, 1500.0, Channel::Mono);
+    modulator.start(&encoded, 9_999, 1500.0, Duration::ZERO, Channel::Mono);
     let mut pcm = [0i16; 2_048];
     while !modulator.is_idle() {
         let frames = modulator.render_stereo(&mut pcm);
-        receiver.write_i16(
+        receive(
+            &detector,
+            &mut decoder,
+            &mut scheduler,
+            mode,
             &pcm[..frames * 2],
             InputFormat::StereoLeft,
             &config,
@@ -97,11 +139,20 @@ fn transmission_crossing_the_sample_ring_roundtrips() {
         if decoded.is_some() {
             break;
         }
-        receiver.write_i16(&silence, InputFormat::Mono, &config, |event| {
-            if let Event::Decoded(frame) = event {
-                decoded = Some(frame);
-            }
-        });
+        receive(
+            &detector,
+            &mut decoder,
+            &mut scheduler,
+            mode,
+            &silence,
+            InputFormat::Mono,
+            &config,
+            |event| {
+                if let Event::Decoded(frame) = event {
+                    decoded = Some(frame);
+                }
+            },
+        );
     }
 
     let decoded = decoded.expect("ring-spanning transmission should decode");
@@ -120,23 +171,38 @@ fn roundtrip(mode: Submode, offset_48k: usize) {
         .with_modes(modes)
         .with_nominal_frequency(1500)
         .with_frequency_range(200, 3_000);
-    let mut receiver = UntimedReceiver::with_modes(modes);
+    let detector = Detector::new(60, 64);
+    let mut decoder = Decoder::with_modes(modes);
+    let mut scheduler = DecodeScheduler::new();
     let mut decoded = Vec::new();
 
     let silence = [0i16; 1_024];
     let mut remaining = offset_48k;
     while remaining != 0 {
         let count = remaining.min(silence.len());
-        receiver.write_i16(&silence[..count], InputFormat::Mono, &config, |_| {});
+        receive(
+            &detector,
+            &mut decoder,
+            &mut scheduler,
+            mode,
+            &silence[..count],
+            InputFormat::Mono,
+            &config,
+            |_| {},
+        );
         remaining -= count;
     }
 
     let mut modulator = Modulator::new();
-    modulator.start_immediate(&encoded, 1500.0, Channel::Mono);
+    modulator.start(&encoded, 9_999, 1500.0, Duration::ZERO, Channel::Mono);
     let mut pcm = [0i16; 2_048];
     while !modulator.is_idle() {
         let frames = modulator.render_stereo(&mut pcm);
-        receiver.write_i16(
+        receive(
+            &detector,
+            &mut decoder,
+            &mut scheduler,
+            mode,
             &pcm[..frames * 2],
             InputFormat::StereoLeft,
             &config,
@@ -151,11 +217,20 @@ fn roundtrip(mode: Submode, offset_48k: usize) {
     let limit = mode.samples_per_period() * 4;
     let mut trailing = 0;
     while decoded.is_empty() && trailing < limit {
-        receiver.write_i16(&silence, InputFormat::Mono, &config, |event| {
-            if let Event::Decoded(frame) = event {
-                decoded.push(frame);
-            }
-        });
+        receive(
+            &detector,
+            &mut decoder,
+            &mut scheduler,
+            mode,
+            &silence,
+            InputFormat::Mono,
+            &config,
+            |event| {
+                if let Event::Decoded(frame) = event {
+                    decoded.push(frame);
+                }
+            },
+        );
         trailing += silence.len();
     }
 
@@ -170,14 +245,55 @@ fn roundtrip(mode: Submode, offset_48k: usize) {
         "{mode}: expected start near {expected}, got {actual}"
     );
 
+    // Another mode may have an earlier window end. Its scan must not discard
+    // duplicate history for this mode.
+    let other = if mode == Submode::Fast {
+        DecodeModes::TURBO
+    } else {
+        DecodeModes::FAST
+    };
+    detector.with_samples(|samples, kin| {
+        decoder.decode(samples, kin / 2, &config.with_modes(other), |_| {});
+    });
+
     // The next overlapping scan sees the same frame but must not emit it again.
-    let duplicate_span = 2 * 48_000;
+    let duplicate_span = mode.samples_per_period() * 4;
     for _ in (0..duplicate_span).step_by(silence.len()) {
-        receiver.write_i16(&silence, InputFormat::Mono, &config, |event| {
-            if let Event::Decoded(frame) = event {
-                decoded.push(frame);
-            }
-        });
+        receive(
+            &detector,
+            &mut decoder,
+            &mut scheduler,
+            mode,
+            &silence,
+            InputFormat::Mono,
+            &config,
+            |event| {
+                if let Event::Decoded(frame) = event {
+                    decoded.push(frame);
+                }
+            },
+        );
     }
     assert_eq!(decoded.len(), 1, "{mode} duplicate suppression");
+}
+
+// Use the same receive process as a slot-based caller: write, schedule, decode.
+fn receive(
+    detector: &Detector,
+    decoder: &mut Decoder,
+    scheduler: &mut DecodeScheduler,
+    mode: Submode,
+    pcm: &[i16],
+    format: InputFormat,
+    config: &DecodeConfig,
+    emit: impl FnMut(Event),
+) {
+    let prev = detector.kin();
+    let stats = detector.write_i16(pcm, format);
+    assert_eq!(stats.frames_dropped, 0);
+    if let Some(window) = scheduler.next_window(mode, stats.kin_after, prev) {
+        detector.with_samples(|samples, _| {
+            decoder.decode(samples, window.start + window.size, config, emit);
+        });
+    }
 }

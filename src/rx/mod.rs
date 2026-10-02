@@ -21,8 +21,6 @@ pub use reassembly::{
     BufferKey, BufferedChecksum, BufferedCommandResult, MessageBufferAssembler, ReassemblyEvent,
 };
 pub use scheduling::{DecodeCursor, DecodeScheduler, DecodeWindow, next_decode_window};
-#[cfg(feature = "experimental-time")]
-pub use time::{UntimedDecoder, UntimedReceiver};
 
 /// Fixed decoder ring-buffer size (`d2` samples at 12 kHz).
 pub const SAMPLE_BUFFER_SIZE: usize = crate::internal::commons::JS8_RX_SAMPLE_SIZE;
@@ -115,9 +113,7 @@ pub struct Decoded {
     pub quality: f32,
     /// Absolute 12 kHz stream position of the detected frame start.
     ///
-    /// This is populated by [`UntimedDecoder`] and is `None` for slot-based
-    /// decoder passes.
-    #[cfg(feature = "experimental-time")]
+    /// Populated by [`Decoder`] with `experimental-time`; otherwise `None`.
     pub sample_position: Option<u64>,
 }
 
@@ -139,7 +135,6 @@ impl Decoded {
             time_offset_seconds,
             frequency_hz,
             quality,
-            #[cfg(feature = "experimental-time")]
             sample_position: None,
         }
     }
@@ -269,7 +264,11 @@ impl DecodeConfig {
         self
     }
 
-    fn legacy(self, valid_samples: usize) -> crate::internal::commons::DecodeParams {
+    fn legacy(
+        self,
+        valid_samples: usize,
+        capacity: usize,
+    ) -> crate::internal::commons::DecodeParams {
         let mut params = crate::internal::commons::DecodeParams {
             nutc: self.utc,
             nfqso: self.nominal_frequency_hz,
@@ -281,7 +280,11 @@ impl DecodeConfig {
         };
 
         let set_window = |submode: Submode, position: &mut usize, size: &mut usize| {
-            (*position, *size) = window_from_kin(valid_samples, submode.samples_per_period());
+            (*position, *size) =
+                window_from_kin(valid_samples, submode.samples_per_period().min(capacity));
+            if cfg!(feature = "experimental-time") {
+                *position %= capacity.max(1);
+            }
         };
         if self.modes.contains(DecodeModes::NORMAL) {
             set_window(Submode::Normal, &mut params.kpos_a, &mut params.ksz_a);
@@ -305,6 +308,10 @@ impl DecodeConfig {
 /// JS8 decoder.
 pub struct Decoder {
     core: crate::decoder::DecoderCore,
+    #[cfg(feature = "experimental-time")]
+    ends: [usize; 5],
+    #[cfg(feature = "experimental-time")]
+    seen: Vec<([u8; 12], u8, Submode, u64)>,
 }
 
 impl Decoder {
@@ -320,6 +327,10 @@ impl Decoder {
     pub fn with_modes(modes: DecodeModes) -> Self {
         Self {
             core: crate::decoder::DecoderCore::with_modes(modes),
+            #[cfg(feature = "experimental-time")]
+            ends: [0; 5],
+            #[cfg(feature = "experimental-time")]
+            seen: Vec::with_capacity(64),
         }
     }
 
@@ -327,6 +338,12 @@ impl Decoder {
     ///
     /// The decoder performs work on the calling thread. It can be moved to a
     /// caller-managed worker thread when background decoding is required.
+    ///
+    /// With `experimental-time`, `valid_samples` is the total 12 kHz sample
+    /// count since reset, as returned by [`Detector::kin`]. Samples wrap at
+    /// `samples.len()`. Each mode searches its latest window and overlapping
+    /// decodes are deduplicated. Use [`DecodeScheduler`] to select overlapping
+    /// windows as audio arrives; pass `window.start + window.size` as the end.
     pub fn decode<E>(
         &mut self,
         samples: &[i16],
@@ -337,13 +354,20 @@ impl Decoder {
     where
         E: FnMut(Event),
     {
-        let valid_samples = valid_samples.min(samples.len());
-        let mut data = crate::internal::commons::DecData {
-            d2: samples,
-            params: config.legacy(valid_samples),
-        };
+        #[cfg(feature = "experimental-time")]
+        {
+            self.decode_stream(samples, valid_samples, config, &mut emit)
+        }
+        #[cfg(not(feature = "experimental-time"))]
+        {
+            let valid_samples = valid_samples.min(samples.len());
+            let mut data = crate::internal::commons::DecData {
+                d2: samples,
+                params: config.legacy(valid_samples, samples.len()),
+            };
 
-        self.core.decode_pass(&mut data, &mut emit)
+            self.core.decode_pass(&mut data, &mut emit)
+        }
     }
 }
 
@@ -367,7 +391,7 @@ mod tests {
     fn config_builds_private_windows_for_selected_modes() {
         let params = DecodeConfig::default()
             .with_modes(DecodeModes::TURBO)
-            .legacy(100_000);
+            .legacy(100_000, SAMPLE_BUFFER_SIZE);
         assert_eq!(params.kpos_c, 28_000);
         assert_eq!(params.ksz_c, 72_000);
         assert_eq!(params.kpos_a, 0);

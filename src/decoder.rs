@@ -7,7 +7,7 @@
 
 use crate::encoder::encode_with_costas;
 use crate::internal;
-use crate::internal::commons::{DecData, JS8_RX_SAMPLE_SIZE};
+use crate::internal::commons::DecData;
 use crate::internal::consts::{
     ASYNCMIN, BASELINE_COUNT, BASELINE_MAX, BASELINE_MIN, BASELINE_NODES, BASELINE_SAMPLE, Fast,
     ModeSpec, NFILT, NFOS, NMAXCAND, NSSY, Normal, Slow, Turbo, Ultra,
@@ -1330,15 +1330,16 @@ impl<
 
         self.dd.fill(0.0);
 
-        let wrap = JS8_RX_SAMPLE_SIZE.saturating_sub(pos) < sz;
+        let wrap = data.d2.len().saturating_sub(pos) < sz;
 
         if wrap {
             debug_assert!(
-                pos <= JS8_RX_SAMPLE_SIZE,
-                "decode: pos={pos} > JS8_RX_SAMPLE_SIZE={JS8_RX_SAMPLE_SIZE}"
+                pos <= data.d2.len(),
+                "decode: pos={pos} > buffer size={}",
+                data.d2.len()
             );
 
-            let first = JS8_RX_SAMPLE_SIZE - pos;
+            let first = data.d2.len() - pos;
             let second = sz - first;
 
             for i in 0..first {

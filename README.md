@@ -71,8 +71,6 @@ let count = decoder.decode(&samples, samples.len(), &config, |event| {
 println!("decoded {count} frames");
 ```
 
-RX `Decoded` places signal data into `codec::DecodedFrame`. `DecodeScheduler` and `MessageBufferAssembler` are available for slot scheduling (to meet the JS8 UTC alignment requirement) or buffered directed-command reassembly. Keep in mind you still have to sync your clock properly, this just gives the slots based on system time.
-
 ## Transmit
 
 `Modulator::start` accepts an `EncodedFrame`. Rendering returns stereo frame count, and both typed and LE byte output avoid heap allocation.
@@ -96,27 +94,6 @@ assert_eq!(frames, stereo.len() / 2);
 ```
 
 `timing::compute_slot` and `Modulator::start_tones` use the protocol properties exposed by `Submode`. Durations use `std::time::Duration` and Unix timestamps are in ms.
-
-## Time-Independent Operation
-
-The `experimental-time` feature removes the requirement to have timeslot aligned waveforms. This has always been possible (I believe it was discussed in the original FT8 paper as well), and the time is mainly used as a correlator to reduce the search effort (I think). After enabling the feature, you can set up a basic untimed config as follows:
-
-```rust
-use js8rs::protocol::DecodeModes;
-use js8rs::rx::{DecodeConfig, Event, InputFormat, UntimedReceiver};
-
-let mut receiver = UntimedReceiver::with_modes(DecodeModes::FAST);
-let config = DecodeConfig::default().with_modes(DecodeModes::FAST);
-let pcm = [0i16; 2048];
-
-receiver.write_i16(&pcm, InputFormat::Mono, &config, |event| {
-    if let Event::Decoded(frame) = event {
-        println!("frame began at 12 kHz sample {:?}", frame.sample_position);
-    }
-});
-```
-
-For already-decimated audio, `UntimedDecoder::push` accepts new 12 kHz mono samples directly. Both receive paths are synchronous like the normal decoder. You can run the continuous-path benchmarks run with `cargo bench-native --features experimental-time --bench time`.
 
 ## Benchmarking
 
