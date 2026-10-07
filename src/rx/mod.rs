@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
 
 //! Synchronous receive-side detection and decoding.
 
@@ -341,9 +340,9 @@ impl Decoder {
     ///
     /// With `experimental-time`, `valid_samples` is the total 12 kHz sample
     /// count since reset, as returned by [`Detector::kin`]. Samples wrap at
-    /// `samples.len()`. Each mode searches its latest window and overlapping
-    /// decodes are deduplicated. Use [`DecodeScheduler`] to select overlapping
-    /// windows as audio arrives; pass `window.start + window.size` as the end.
+    /// `samples.len()`. Each mode searches its latest window and duplicate
+    /// decodes are ignored. Use [`DecodeScheduler`] to select overlapping
+    /// windows as audio arrives, pass `window.start + window.size` as the end.
     pub fn decode<E>(
         &mut self,
         samples: &[i16],

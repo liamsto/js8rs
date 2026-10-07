@@ -1,18 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Copyright (C) 2025 Punk Kaos <punk.kaos@gmail.com>
-// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
-//
-// Ported freq/timing trackers to Rust and removed Qt diagnostics.
-
-#![allow(dead_code)]
 
 use num_complex::Complex32;
 
 /// Lightweight Kalman tracker for residual frequency offset.
 #[derive(Clone, Debug)]
 pub struct FrequencyTracker {
-    enabled: bool,
     est_hz: f64,
     fs_hz: f64,
     alpha: f64,
@@ -32,7 +26,6 @@ impl FrequencyTracker {
     #[inline]
     pub const fn new() -> Self {
         Self {
-            enabled: true,
             est_hz: 0.0,
             fs_hz: 0.0,
             alpha: 0.15,
@@ -52,7 +45,6 @@ impl FrequencyTracker {
         max_step_hz: f64,
         max_error_hz: f64,
     ) {
-        self.enabled = true;
         self.est_hz = initial_hz;
         self.fs_hz = sample_rate_hz;
         self.alpha = alpha;
@@ -66,37 +58,12 @@ impl FrequencyTracker {
     pub const fn reset_default(&mut self, initial_hz: f64, sample_rate_hz: f64) {
         self.reset(initial_hz, sample_rate_hz, 0.15, 0.3, 5.0);
     }
-
-    #[inline]
-    pub const fn disable(&mut self) {
-        self.enabled = false;
-    }
-
-    #[inline]
-    pub const fn enabled(&self) -> bool {
-        self.enabled
-    }
-
-    #[inline]
-    pub const fn current_hz(&self) -> f64 {
-        self.est_hz
-    }
-
-    #[inline]
-    pub fn average_step_hz(&self) -> f64 {
-        if self.updates > 0 {
-            self.sum_abs / f64::from(self.updates)
-        } else {
-            0.0
-        }
-    }
-
     /// Rotate samples by the tracked residual frequency.
     ///
     /// Equivalent to C++ `apply(std::complex`<float>* data, int count).
     #[inline]
     pub fn apply(&self, data: &mut [Complex32]) {
-        if !self.enabled || data.is_empty() || self.fs_hz <= 0.0 {
+        if data.is_empty() || self.fs_hz <= 0.0 {
             return;
         }
 
@@ -113,7 +80,7 @@ impl FrequencyTracker {
     /// Nudge estimate using pilot residuals.
     #[inline]
     pub const fn update(&mut self, mut residual_hz: f64, weight: f64) {
-        if !self.enabled || self.fs_hz <= 0.0 {
+        if self.fs_hz <= 0.0 {
             return;
         }
         if !residual_hz.is_finite() || !weight.is_finite() || weight <= 0.0 {
@@ -136,7 +103,6 @@ impl FrequencyTracker {
 /// Tracks residual timing (sample) offset between the symbol clock and the signal.
 #[derive(Clone, Debug)]
 pub struct TimingTracker {
-    enabled: bool,
     est_samples: f64,
     alpha: f64,
     max_step: f64,
@@ -155,7 +121,6 @@ impl TimingTracker {
     #[inline]
     pub const fn new() -> Self {
         Self {
-            enabled: true,
             est_samples: 0.0,
             alpha: 0.15,
             max_step: 0.35,
@@ -173,7 +138,6 @@ impl TimingTracker {
         max_step: f64,
         max_total_error: f64,
     ) {
-        self.enabled = true;
         self.est_samples = initial_samples;
         self.alpha = alpha;
         self.max_step = max_step;
@@ -183,34 +147,12 @@ impl TimingTracker {
     }
 
     #[inline]
-    pub const fn disable(&mut self) {
-        self.enabled = false;
-    }
-
-    #[inline]
-    pub const fn enabled(&self) -> bool {
-        self.enabled
-    }
-
-    #[inline]
     pub const fn current_samples(&self) -> f64 {
         self.est_samples
     }
 
     #[inline]
-    pub fn average_step_samples(&self) -> f64 {
-        if self.updates > 0 {
-            self.sum_abs / f64::from(self.updates)
-        } else {
-            0.0
-        }
-    }
-
-    #[inline]
     pub const fn update(&mut self, mut residual_samples: f64, weight: f64) {
-        if !self.enabled {
-            return;
-        }
         if !residual_samples.is_finite() || !weight.is_finite() || weight <= 0.0 {
             return;
         }

@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Copyright (C) 2018 Jordan Sherer <kn4crd@gmail.com>
-// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
-//
-// Ported the detector to Rust and added no alloc typed input paths.
 
 use std::sync::Mutex;
 

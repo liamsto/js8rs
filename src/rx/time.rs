@@ -30,8 +30,7 @@ impl Decoder {
             window_from_kin(end, mode.samples_per_period().min(samples.len())).0 as u64
         });
         let mut params = config.legacy(end, samples.len());
-        // Only reuse spectra for advancing, complete windows. Partial windows
-        // contain zero padding which changes as new samples arrive.
+        // Only reuse spectra for advancing, complete windows, partial windows contain zero padding which changes as new samples arrive
         let mut reuse = true;
         for (i, mode) in MODES.iter().copied().enumerate() {
             if config.modes.contains(mode.into()) {

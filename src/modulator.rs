@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Copyright (C) 2018 Jordan Sherer <kn4crd@gmail.com>
-// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
-//
-// Ported PCM modulation to Rust and added allocation free typed rendering.
 
 use crate::codec::EncodedFrame;
 use crate::encoder::TONES_PER_FRAME;

@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Copyright (C) 2018 Jordan Sherer <kn4crd@gmail.com>
-// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
-//
-// Ported JS8 command definitions and parsing to Rust.
+// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net> - Ported JS8 command definitions and parsing to Rust and tried to reduce allocs.
 
-//! Allocation-conscious parsing for JS8 application commands.
+//! Parsing for JS8 application commands.
 
 use core::ops::Range;
 

@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Copyright (C) 2025 Allan Bazinet <w6baz@arrl.net>
-// Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
-//
-// Ported the JS8 decoder to Rust and replaced Qt and FFTW integration.
 
 use crate::encoder::encode_with_costas;
 use crate::internal;
@@ -265,51 +262,43 @@ impl<
         let mut timing_tracker = TimingTracker::new();
         timing_tracker.reset(0.0, 0.15, 0.35, timing_max_shift);
 
-        let freq_enabled = freq_tracker.enabled();
+        let estimate_residual_hz =
+            |csymb: &[Complex32; NDOWNSPS], expected_tone: usize| -> Option<f32> {
+                if expected_tone + 1 >= Mode::NDOWNSPS {
+                    return None;
+                }
 
-        let estimate_residual_hz = |csymb: &[Complex32; NDOWNSPS],
-                                    expected_tone: usize,
-                                    freq_enabled: bool|
-         -> Option<f32> {
-            if !freq_enabled {
-                return None;
-            }
-            if expected_tone + 1 >= Mode::NDOWNSPS {
-                return None;
-            }
+                let m0 = csymb[expected_tone].norm_sqr();
+                let mplus = csymb[expected_tone + 1].norm_sqr();
+                let mminus = if expected_tone > 0 {
+                    csymb[expected_tone - 1].norm_sqr()
+                } else {
+                    0.0
+                };
 
-            let m0 = csymb[expected_tone].norm_sqr();
-            let mplus = csymb[expected_tone + 1].norm_sqr();
-            let mminus = if expected_tone > 0 {
-                csymb[expected_tone - 1].norm_sqr()
-            } else {
-                0.0
+                if m0 <= 0.0 {
+                    return None;
+                }
+
+                let ratio = m0 / (mplus + mminus + 1e-12);
+                if ratio < 1.5 {
+                    return None;
+                }
+
+                let denom = 2.0f32.mul_add(-m0, mminus) + mplus;
+                if denom.abs() < 1e-9 {
+                    return None;
+                }
+
+                let mut delta: f32 = 0.5 * (mminus - mplus) / denom;
+                delta = delta.clamp(-0.5, 0.5);
+
+                Some(delta * (fs2 / (Mode::NDOWNSPS as f32)))
             };
-
-            if m0 <= 0.0 {
-                return None;
-            }
-
-            let ratio = m0 / (mplus + mminus + 1e-12);
-            if ratio < 1.5 {
-                return None;
-            }
-
-            let denom = 2.0f32.mul_add(-m0, mminus) + mplus;
-            if denom.abs() < 1e-9 {
-                return None;
-            }
-
-            let mut delta: f32 = 0.5 * (mminus - mplus) / denom;
-            delta = delta.clamp(-0.5, 0.5);
-
-            Some(delta * (fs2 / (Mode::NDOWNSPS as f32)))
-        };
 
         let goertzel_energy = |cd0: &[Complex32; NP],
                                start: i32,
                                expected_tone: usize,
-                               freq_enabled: bool,
                                freq_tracker: &mut FrequencyTracker|
          -> Option<f32> {
             if start < 0 {
@@ -323,9 +312,7 @@ impl<
             let mut tmp = [CZERO; NDOWNSPS];
             tmp.copy_from_slice(&cd0[start..start + Mode::NDOWNSPS]);
 
-            if freq_enabled {
-                freq_tracker.apply(&mut tmp);
-            }
+            freq_tracker.apply(&mut tmp);
 
             let goertzel_wstep =
                 Complex32::from_polar(1.0, -TAU * (expected_tone as f32) / (Mode::NDOWNSPS as f32));
@@ -347,11 +334,7 @@ impl<
         let mut k = 0usize;
         while k < NN {
             let i1_base = ibest + (k as i32) * (Mode::NDOWNSPS as i32);
-            let timing_shift = if timing_tracker.enabled() {
-                timing_tracker.current_samples().round() as i32
-            } else {
-                0
-            };
+            let timing_shift = timing_tracker.current_samples().round() as i32;
             let mut i1 = i1_base + timing_shift;
 
             let max_start = (NP2 - Mode::NDOWNSPS) as i32;
@@ -367,9 +350,7 @@ impl<
                 let csymb = self.csymb.get_mut();
                 csymb.copy_from_slice(&cd0[start..start + Mode::NDOWNSPS]);
 
-                if freq_enabled {
-                    freq_tracker.apply(csymb);
-                }
+                freq_tracker.apply(csymb);
 
                 fft.process(csymb);
 
@@ -378,63 +359,41 @@ impl<
                     s2[i][k] = mag / 1000.0;
                 }
 
-                if freq_tracker.enabled() || timing_tracker.enabled() {
-                    let is_pilot = (k < 7) || (36..43).contains(&k) || (72..79).contains(&k);
-                    if is_pilot {
-                        let (costas_block, costas_col) = if (72..79).contains(&k) {
-                            (2usize, k - 72)
-                        } else if (36..43).contains(&k) {
-                            (1usize, k - 36)
-                        } else {
-                            (0usize, k)
-                        };
+                let is_pilot = (k < 7) || (36..43).contains(&k) || (72..79).contains(&k);
+                if is_pilot {
+                    let (costas_block, costas_col) = if (72..79).contains(&k) {
+                        (2usize, k - 72)
+                    } else if (36..43).contains(&k) {
+                        (1usize, k - 36)
+                    } else {
+                        (0usize, k)
+                    };
 
-                        let expected_tone = costas[costas_block][costas_col];
+                    let expected_tone = costas[costas_block][costas_col];
 
-                        if let Some(residual) =
-                            estimate_residual_hz(csymb, expected_tone as usize, freq_enabled)
-                        {
-                            freq_tracker.update(f64::from(residual), 1.0);
-                        }
+                    if let Some(residual) = estimate_residual_hz(csymb, expected_tone as usize) {
+                        freq_tracker.update(f64::from(residual), 1.0);
+                    }
 
-                        if timing_tracker.enabled() {
-                            let cd0 = self.cd0.get();
-                            let e0 = goertzel_energy(
-                                cd0,
-                                i1,
-                                expected_tone as usize,
-                                freq_enabled,
-                                &mut freq_tracker,
-                            );
-                            let e_early = goertzel_energy(
-                                cd0,
-                                i1 - 1,
-                                expected_tone as usize,
-                                freq_enabled,
-                                &mut freq_tracker,
-                            );
-                            let e_late = goertzel_energy(
-                                cd0,
-                                i1 + 1,
-                                expected_tone as usize,
-                                freq_enabled,
-                                &mut freq_tracker,
-                            );
+                    let cd0 = self.cd0.get();
+                    let e0 = goertzel_energy(cd0, i1, expected_tone as usize, &mut freq_tracker);
+                    let e_early =
+                        goertzel_energy(cd0, i1 - 1, expected_tone as usize, &mut freq_tracker);
+                    let e_late =
+                        goertzel_energy(cd0, i1 + 1, expected_tone as usize, &mut freq_tracker);
 
-                            let tone_mag = s2[expected_tone as usize][k];
+                    let tone_mag = s2[expected_tone as usize][k];
 
-                            if let (Some(e0), Some(e_early), Some(e_late)) = (e0, e_early, e_late)
-                                && tone_mag > 1e-6
-                            {
-                                let denom = e0 + 1e-6;
-                                let grad = (e_late - e_early) / denom;
+                    if let (Some(e0), Some(e_early), Some(e_late)) = (e0, e_early, e_late)
+                        && tone_mag > 1e-6
+                    {
+                        let denom = e0 + 1e-6;
+                        let grad = (e_late - e_early) / denom;
 
-                                let weight = f64::from(tone_mag / 5.0).clamp(0.0, 1.0);
-                                let error_samples = (0.25 * f64::from(grad)).clamp(-1.0, 1.0);
+                        let weight = f64::from(tone_mag / 5.0).clamp(0.0, 1.0);
+                        let error_samples = (0.25 * f64::from(grad)).clamp(-1.0, 1.0);
 
-                                timing_tracker.update(error_samples, weight);
-                            }
-                        }
+                        timing_tracker.update(error_samples, weight);
                     }
                 }
             }

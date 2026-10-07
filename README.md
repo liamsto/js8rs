@@ -1,99 +1,18 @@
 # js8rs 
 
-`js8rs` is a lightweight Rust library for JS8-compatible framing, encoding, modulation, detection, and decoding, with a focus on performance. The goal is to present a clean and easy to use API with which to interact with the protocol, while also making optimizations where possible to run on more constrained platforms. I am by no means a performance engineer, so if you have suggestions let me know!
+A Rust library for the JS8 radio protocol. It is an experiment. If you want to use the JS8 protocol normally, obviously use JS8Call-improved, which this is adapted from. It is a WIP, but is functional and compatible with JS8Call. You should be able to set up a full transmit and decode chain using this code. 
 
-The core receive API is synchronous. `Decoder` is `Send`, so applications can move it to their own thread or runtime and choose their own queueing, backpressure, priority, and shutdown behavior.
+It also includes some very experimental  code for transmitting and decoding without UTC alignment. This has been discussed in JS8Call before, but last I checked it has been #ifdefd out of the build. The basic idea, as I understand it, is that FT8, and by derivation JS8, use the timeslot alignment as a correlator for the message to reduce the search time. This alignment can be removed at the cost of CPU cycles, but it allows you to transmit whenever you want, and also to chain transmissions together. To try it out, enable `experimental-time`. 
 
-This library is experimental, and primarily for my own experiments, both with radio and performance engineering. If you want to use the JS8 protocol normally, you should obviously use JS8Call-improved, which this is adapted from. It is also a WIP, but is fully functional and compatible with JS8Call in its current state.
+## Why Rust?
+
+Cuz idk C++ very well
 
 ## Copyright
 
-This program is licensed under the GPLv3. It is derived in large part from GPLv3-licensed JS8Call-improved code. All code remains a copyright of the original authors, and copyright appears as appropriate on all derived source files.
-
-This project is an independent experiment and is not affiliated with nor endorsed by the JS8Call project. It is a derivative of the great work done by Jordan Sherer and the rest of the JS8Call/JS8Call-improved team. 
+This program is licensed under the GPLv3, and is a derivative work. All code remains a copyright of the original authors, and copyright appears as appropriate on all derived source files. This project is an independent experiment and is not affiliated with nor endorsed by the JS8Call project. It is a derivative of the great work done by Jordan Sherer and the rest of the JS8Call/JS8Call-improved team. 
 
 Please see the [LICENSE](./LICENSE) for more information. See the comment headers in each file for information on modifications made to the original source, where relevant.
-
-## Quick Start
-
-```rust
-use js8rs::codec::{BuildFramesOptions, build_frames};
-use js8rs::protocol::{FrameFlags, Submode};
-
-let built = build_frames(&BuildFramesOptions::new("HELLO WORLD", Submode::Fast));
-assert!(built.frames[0].flags.contains(FrameFlags::FIRST));
-
-let encoded = built.encode()?;
-assert_eq!(encoded[0].tones.len(), 79);
-```
-
-## Protocol And Codec
-
-`protocol` contains the public types: `Submode`, `FrameType`, `FrameFlags`, and `DecodeModes`. `FrameFlags` handles the flags JS8 uses to mark frame position in a message, f.eks.  `FrameFlags::FIRST | FrameFlags::LAST` for a single frame message. Explicit raw conversion can be done with `bits`, `from_bits`, and `from_bits_truncate`.
-
-`codec` provides `build_frames`, `BuildFramesResult::encode`, the low-level `encode_tones` primitive, parsing into `DecodedFrame`.
-
-```rust
-use js8rs::codec::{BuildFramesOptions, build_frames, parse_frame};
-use js8rs::protocol::Submode;
-
-let built = build_frames(
-    &BuildFramesOptions::new("K1ABC K2XYZ MSG HELLO", Submode::Fast)
-        .with_station("K1ABC", "EM73"),
-);
-let frame = &built.frames[0];
-let parsed = parse_frame(&frame.encoded, frame.flags, built.submode);
-println!("{}", parsed.message);
-```
-
-## Receive
-
-`Detector` accepts 48 kHz PCM and decimates it into the fixed 12 kHz decoder buffer, not much is different from JS8Call-improved here aside from some optimization. `with_samples` borrows that buffer without copying, while `copy_samples` copies into caller-owned reusable storage if you cannot pause.
-
-`DecodeConfig` contains only user configuration.
-
-```rust
-use js8rs::protocol::DecodeModes;
-use js8rs::rx::{DecodeConfig, Decoder, Event, SAMPLE_BUFFER_SIZE};
-
-let mut decoder = Decoder::with_modes(DecodeModes::FAST);
-let config = DecodeConfig::default()
-    .with_modes(DecodeModes::FAST)
-    .with_nominal_frequency(1500)
-    .with_frequency_range(200, 3000);
-let samples = vec![0i16; SAMPLE_BUFFER_SIZE];
-
-let count = decoder.decode(&samples, samples.len(), &config, |event| {
-    if let Event::Decoded(decoded) = event {
-        println!("{} at {} Hz", decoded.frame.message, decoded.frequency_hz);
-    }
-});
-println!("decoded {count} frames");
-```
-
-## Transmit
-
-`Modulator::start` accepts an `EncodedFrame`. Rendering returns stereo frame count, and both typed and LE byte output avoid heap allocation.
-
-```rust
-use js8rs::codec::{BuildFramesOptions, build_frames};
-use js8rs::protocol::Submode;
-use js8rs::tx::{Channel, Modulator};
-use std::time::Duration;
-
-let frame = build_frames(&BuildFramesOptions::new("HELLO", Submode::Fast))
-    .encode()?
-    .remove(0);
-let mut modulator = Modulator::new();
-modulator.start(&frame, 0, 1500.0, Duration::ZERO, Channel::Mono);
-
-let mut stereo = [0i16; 2048];
-let frames = modulator.render_stereo(&mut stereo);
-assert_eq!(frames, stereo.len() / 2);
-# Ok::<(), js8rs::codec::EncodeError>(())
-```
-
-`timing::compute_slot` and `Modulator::start_tones` use the protocol properties exposed by `Submode`. Durations use `std::time::Duration` and Unix timestamps are in ms.
 
 ## Benchmarking
 
@@ -103,11 +22,8 @@ The library is optimized to make use of SIMD where possible. As such, you will s
 cargo bench-native
 ```
 
-Pass normal benchmark arguments after `--`, for example:
+I have tried to optimize the code where possible to improve performance, mainly by allowing for vectorization and whatnot. I am by no means a performance engineer, so if you have suggestions let me know!
 
-```sh
-cargo bench-native --bench micro -- modulator_render
-```
 
 ### Encode/Decode Benchmark Results
 
