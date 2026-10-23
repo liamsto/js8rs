@@ -172,32 +172,25 @@ impl MessageBufferAssembler {
             String::new()
         };
 
-        let (payload, checksum) = finalize_buffered_payload(&command, payload);
         let result = BufferedCommandResult {
             key,
             from,
             to,
             command,
             payload,
-            checksum: checksum.clone(),
+            checksum: None,
             utc: decoded.utc,
             snr: decoded.snr,
             flags: decoded.frame.flags,
             was_buffered: false,
         };
 
-        if let Some(c) = checksum
-            && !c.valid
-        {
-            return Some(ReassemblyEvent::DroppedInvalidChecksum(key));
-        }
-
         Some(ReassemblyEvent::Completed(result))
     }
 
     fn finish_state(&self, key: BufferKey, state: BufferState) -> ReassemblyEvent {
         let payload = rstrip_spaces(&state.fragments.concat());
-        let (payload, checksum) = finalize_buffered_payload(&state.command, payload);
+        let (payload, checksum) = finalize_buffered_payload(&state.to, &state.command, payload);
 
         if let Some(c) = &checksum
             && !c.valid
@@ -228,8 +221,14 @@ fn rstrip_spaces(input: &str) -> String {
     input.trim_end_matches(' ').to_owned()
 }
 
-fn finalize_buffered_payload(command: &str, payload: String) -> (String, Option<BufferedChecksum>) {
-    if !is_buffered_token(command) {
+fn finalize_buffered_payload(
+    to: &str,
+    command: &str,
+    payload: String,
+) -> (String, Option<BufferedChecksum>) {
+    if !is_buffered_token(command)
+        || (to.eq_ignore_ascii_case("@APRSIS") && matches!(command, " MSG" | " MSG TO:"))
+    {
         return (payload, None);
     }
 
@@ -421,29 +420,68 @@ mod tests {
     }
 
     #[test]
-    fn single_buffered_directed_last_frame_without_checksum_is_dropped() {
-        let frame = pack_directed_message("K2XYZ MSG", "K1ABC", None, None, None, None, None);
-        let decoded = decoded_from(&frame, FrameFlags::LAST, Submode::Normal, 1500.0);
-
-        let mut assembler = MessageBufferAssembler::new();
-        let event = assembler.push_decoded(&decoded);
-        assert!(matches!(
-            event,
-            Some(ReassemblyEvent::DroppedInvalidChecksum(_))
-        ));
+    fn empty_cmds() {
+        for cmd in [" MSG", " QUERY", " QUERY MSGS", " QUERY CALL", " CMD"] {
+            let frame = pack_directed_message(
+                &format!("K2XYZ{cmd}"),
+                "K1ABC",
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            let decoded = decoded_from(&frame, FrameFlags::LAST, Submode::Normal, 1500.0);
+            let Some(ReassemblyEvent::Completed(done)) =
+                MessageBufferAssembler::new().push_decoded(&decoded)
+            else {
+                panic!("empty {cmd} did not complete");
+            };
+            assert_eq!(done.command, cmd);
+            assert!(done.payload.is_empty());
+            assert!(done.checksum.is_none());
+        }
     }
 
     #[test]
     fn finalize_buffered_payload_handles_16_bit_checksum_and_invalid_payload() {
         let msg16 = "HELLO THERE";
         let cs16 = crate::varicode::checksum16(msg16);
-        let (out16, c16) = finalize_buffered_payload(" MSG", format!(" {msg16} {cs16}"));
+        let (out16, c16) = finalize_buffered_payload("K2XYZ", " MSG", format!(" {msg16} {cs16}"));
         assert_eq!(out16, msg16);
         assert!(c16.as_ref().is_some_and(|c| c.valid && c.size_bits == 16u8));
 
-        let (bad, bad_cs) = finalize_buffered_payload(" MSG", " HELLO BAD".to_string());
+        let (bad, bad_cs) = finalize_buffered_payload("K2XYZ", " MSG", " HELLO BAD".to_string());
         assert_eq!(bad, "HELLO");
         assert!(bad_cs.is_some());
         assert!(!bad_cs.unwrap().valid);
+    }
+
+    #[test]
+    fn aprs_msgs() {
+        for (to, cmd, crc) in [
+            ("@APRSIS", " MSG", false),
+            ("@APRSIS", " MSG TO:", false),
+            ("@APRSIS", " CMD", true),
+            ("@ALLCALL", " MSG", true),
+        ] {
+            let frs = build_frames(
+                &BuildFramesOptions::new(format!("{to}{cmd} HELLO WORLD"), Submode::Fast)
+                    .with_station("K1ABC", "EM73"),
+            );
+            let mut asm = MessageBufferAssembler::new();
+            let mut done = None;
+            for fr in frs.frames {
+                let dec = decoded_from(&fr.encoded, fr.flags, Submode::Fast, 1500.0);
+                if let Some(ReassemblyEvent::Completed(res)) = asm.push_decoded(&dec) {
+                    done = Some(res);
+                }
+            }
+            let done = done.expect("group command did not complete");
+            assert_eq!(done.to, to);
+            assert_eq!(done.payload, "HELLO WORLD");
+            assert_eq!(done.checksum.is_some(), crc);
+            assert!(done.checksum.is_none_or(|ck| ck.valid));
+        }
     }
 }

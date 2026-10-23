@@ -755,11 +755,13 @@ fn snr_end(text: &str, pos: usize) -> usize {
     if end == digits {
         return pos;
     }
-    text[start..end]
+    if text[start..end]
         .parse::<i32>()
-        .ok()
-        .filter(|value| (-31..=31).contains(value))
-        .map_or(pos, |_| end)
+        .is_ok_and(|value| !(-31..=31).contains(&value))
+    {
+        end -= 1;
+    }
+    end
 }
 
 fn heartbeat_parts(text: &str) -> Option<(&str, &str, usize)> {
@@ -1188,7 +1190,7 @@ pub fn pack_directed_message(
     if let Some(p) = to_out {
         *p = raw_to.to_owned();
     }
-    let is_to_compound = is_compound_call(raw_to);
+    let is_to_compound = !BASECALLS.contains_key(raw_to) && is_compound_call(raw_to);
     if let Some(p) = to_compound_out {
         *p = is_to_compound;
     }
@@ -1625,7 +1627,8 @@ pub fn build_message_frames(
                 if is_compound_call(mycall) || dir_to_compound {
                     // Send a DE compound frame first
                     let de_compound_message = format!("`{mycall} {mygrid}");
-                    let de_compound_frame = pack_compound_message(&de_compound_message, None);
+                    let de_compound_frame =
+                        pack_compound_message(de_compound_message.trim_end(), None);
                     if !de_compound_frame.is_empty() {
                         frames.push((de_compound_frame, ITYPE_JS8CALL));
                     }

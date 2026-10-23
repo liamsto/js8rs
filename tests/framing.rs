@@ -156,3 +156,94 @@ fn selected_call_is_not_prepended_to_base_call_lines() {
     ));
     assert!(!first.message.contains("K2XYZ"));
 }
+
+#[test]
+fn jsc_cmds() {
+    // from varicode
+    let cases = &[
+        ("K1ABC", "@ALLCALL SNR?", &[("Vk64SVGGOq00", 3)][..]),
+        (
+            "K1ABC",
+            "@APRSIS MSG HELLO WORLD",
+            &[("Vk64SVGGPoa0", 1), ("UBXRtA7+++++", 6)],
+        ),
+        (
+            "K1ABC",
+            "K2XYZ> K3ABC HELLO WORLD",
+            &[
+                ("Vk64SUugOyK0", 1),
+                ("abiUETRnSBV+", 4),
+                ("UvJQg9R7++++", 6),
+            ],
+        ),
+        (
+            "K1ABC",
+            "K2XYZ > K3ABC HELLO WORLD",
+            &[
+                ("Vk64SUugOyK0", 1),
+                ("abiUETRnSBV+", 4),
+                ("UvJQg9R7++++", 6),
+            ],
+        ),
+        (
+            "K1ABC",
+            "K2XYZ QUERY MSG 123",
+            &[("Vk64SUugOyi0", 1), ("bqs2pMsc2C++", 6)],
+        ),
+        (
+            "K1ABC",
+            "K2XYZ QUERY MSG HELLO",
+            &[("Vk64SUugOyi0", 1), ("bql5mkHGZ1F+", 6)],
+        ),
+        (
+            "K1ABC",
+            "K2XYZ CQ CQ CQ",
+            &[("Vk64SUugOzy0", 1), ("VYlnNuZ+++++", 6)],
+        ),
+        (
+            "K1ABC",
+            "K2XYZ HB EM73",
+            &[("Vk64SUugOzy0", 1), ("S4BYhe3+++++", 6)],
+        ),
+        (
+            "K1ABC",
+            "K2XYZ HEARTBEAT",
+            &[("Vk64SUugOzy0", 1), ("+CSJ++++++++", 6)],
+        ),
+        (
+            "K1ABC",
+            "K2XYZ SNR -32",
+            &[("Vk64SUugOzaS", 1), ("ip++++++++++", 6)],
+        ),
+        (
+            "K1ABC",
+            "F/K2XYZ CQ",
+            &[
+                ("AURtg4DOOkfO", 1),
+                ("H-S6H8F+G+N8", 0),
+                ("VYF+++++++++", 6),
+            ],
+        ),
+        (
+            "F/K1ABC",
+            "K2XYZ> K3ABC HELLO WORLD",
+            &[
+                ("9-S5oVx5ukfO", 1),
+                ("IUnN3JQHO+Ju", 0),
+                ("abiUETRnSBV+", 4),
+                ("UvJQg9R7++++", 6),
+            ],
+        ),
+    ];
+    for &(call, msg, want) in cases {
+        for mode in [Submode::Fast, Submode::Turbo, Submode::Slow, Submode::Ultra] {
+            let frs = build_frames(&BuildFramesOptions::new(msg, mode).with_station(call, "EM73"));
+            let got: Vec<_> = frs
+                .frames
+                .iter()
+                .map(|f| (f.encoded.as_str(), f.flags.bits()))
+                .collect();
+            assert_eq!(got, want, "{call}: {msg} ({mode:?})");
+        }
+    }
+}

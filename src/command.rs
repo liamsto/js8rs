@@ -1266,9 +1266,17 @@ fn match_command<'a>(
 }
 
 pub(crate) fn command_prefix(text: &str, start: usize) -> Option<(CommandKind, &str, usize)> {
+    if text.as_bytes().get(start) == Some(&b'>') {
+        return Some((CommandKind::Relay, &text[start..start + 1], start + 1));
+    }
     let found = match_command(text, text, start, false)?;
-    let end = start + found.def.text.len();
-    Some((found.def.kind, &text[start..end], end))
+    let (kind, len) = match found.def.kind {
+        CommandKind::Cq | CommandKind::Heartbeat => return None,
+        CommandKind::QueryMsg => (CommandKind::Query, 5),
+        kind => (kind, found.def.text.len()),
+    };
+    let end = start + len;
+    Some((kind, &text[start..end], end))
 }
 
 fn parse_arg<'a>(
