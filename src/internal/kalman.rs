@@ -23,6 +23,10 @@ impl Default for FrequencyTracker {
 }
 
 impl FrequencyTracker {
+    pub const fn current_hz(&self) -> f64 {
+        self.est_hz
+    }
+
     #[inline]
     pub const fn new() -> Self {
         Self {

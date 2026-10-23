@@ -3,7 +3,6 @@
 // Copyright (C) 2025 Allan Bazinet <w6baz@arrl.net>
 
 use crate::encoder::encode_with_costas;
-use crate::internal;
 use crate::internal::commons::DecData;
 use crate::internal::consts::{
     ASYNCMIN, BASELINE_COUNT, BASELINE_MAX, BASELINE_MIN, BASELINE_NODES, BASELINE_SAMPLE, Fast,
@@ -12,14 +11,17 @@ use crate::internal::consts::{
 use crate::internal::consts::{K, N, ND, NFSRCH, NN, NP, NP2, NROWS};
 use crate::internal::kalman::{FrequencyTracker, TimingTracker};
 use crate::internal::ldpc_feedback::{
-    LDPC_FEEDBACK_MAX_PASSES_DEFAULT, LLR_ERASURE_THRESHOLD_DEFAULT, refine_llrs_with_ldpc_feedback,
+    LDPC_FEEDBACK_MAX_PASSES_DEFAULT, LLR_ERASURE_THRESHOLD_DEFAULT, LLR_SCALE_DEFAULT,
+    refine_llrs_with_ldpc_feedback,
 };
 use crate::internal::local_routines::{check_crc12, extract_message_174};
 use crate::internal::local_types::{
-    Decode, DecodeMap, FftPlanManager, FftPlanType, KahanSum, belief_decoder::bpdecode174,
+    Decode, DecodeMap, FftPlanManager, FftPlanType, KahanSum,
+    belief_decoder::{BpOpts, BpRes, bpdecode174},
 };
-use crate::internal::soft_combiner::SoftCombiner;
+use crate::internal::soft_combiner::{SoftCombined, SoftCombiner};
 use crate::internal::whitening_processor::WhiteningProcessor;
+use crate::internal::{self, aided, coherent, sic};
 use crate::protocol::{DecodeModes, FrameFlags};
 use crate::rx::{
     DecodeFinished, DecodeStarted, Decoded, Event, SyncMetric, SyncStart, SyncState, SyncStateType,
@@ -66,6 +68,90 @@ impl<T> DerefMut for Align64<T> {
 
 const CZERO: Complex32 = Complex32 { re: 0.0, im: 0.0 };
 
+#[derive(Clone, Copy)]
+struct BpSnap {
+    llr: [f32; N],
+    res: BpRes,
+    cw: [i8; N],
+    dec: [i8; K],
+}
+
+struct BpTry {
+    dec: [i8; K],
+    cw: [i8; N],
+    near_llr: [f32; N],
+    near_cw: [i8; N],
+    checks: usize,
+    pass: u8,
+    hard: i32,
+    cache: [Option<BpSnap>; 2],
+}
+
+impl BpTry {
+    fn new() -> Self {
+        Self {
+            dec: [0; K],
+            cw: [0; N],
+            near_llr: [0.0; N],
+            near_cw: [0; N],
+            checks: K + 1,
+            pass: 0,
+            hard: -1,
+            cache: [None; 2],
+        }
+    }
+
+    fn run(&mut self, llr: &[f32; N], pass: u8, sync: f32, opts: BpOpts, remember: bool) -> bool {
+        let cacheable = opts.max_iter == 30 && opts.early_abort && opts.llr_scale == 1.0;
+        let cached = cacheable
+            .then(|| {
+                self.cache.iter().flatten().find(|snap| {
+                    snap.llr
+                        .iter()
+                        .zip(llr)
+                        .all(|(a, b)| a.to_bits() == b.to_bits())
+                })
+            })
+            .flatten();
+        let bp = if let Some(snap) = cached {
+            self.cw = snap.cw;
+            if snap.res.hard_err >= 0 {
+                self.dec = snap.dec;
+            }
+            snap.res
+        } else {
+            let bp = bpdecode174(llr, &mut self.dec, &mut self.cw, opts);
+            if cacheable
+                && pass == 1
+                && remember
+                && llr.iter().all(|v| v.is_finite())
+                && let Some(slot) = self.cache.iter_mut().find(|slot| slot.is_none())
+            {
+                *slot = Some(BpSnap {
+                    llr: *llr,
+                    res: bp,
+                    cw: self.cw,
+                    dec: self.dec,
+                });
+            }
+            bp
+        };
+        if remember && bp.best_checks < self.checks && bp.best_cw_valid {
+            self.checks = bp.best_checks;
+            self.pass = pass;
+            self.near_llr = *llr;
+            self.near_cw = bp.best_cw;
+        }
+        self.hard = bp.hard_err;
+        self.cw.iter().any(|&b| b != 0)
+            && (0..60).contains(&self.hard)
+            && !(sync < 2.0 && self.hard > 35)
+            && !(pass > 2 && self.hard > 39)
+            && !(pass == 4 && self.hard > 30)
+            && check_crc12(&self.dec)
+    }
+}
+
 /// Decoder state specialized by Mode.
 pub struct DecodeMode<
     Mode: ModeSpec,
@@ -95,6 +181,8 @@ pub struct DecodeMode<
     savg: [f32; NSPS],
     plans: FftPlanManager,
     m_soft_combiner: SoftCombiner<N>,
+    legacy_combiner: SoftCombiner<N>,
+    sic_alt: Option<Vec<f32>>,
     m_llr_erasure_threshold: f32,
     m_enable_ldpc_feedback: bool,
     m_max_ldpc_passes: u8,
@@ -161,6 +249,8 @@ impl<
             savg: [0.0; NSPS],
             plans: FftPlanManager::new(),
             m_soft_combiner: SoftCombiner::new(),
+            legacy_combiner: SoftCombiner::new(),
+            sic_alt: None,
             m_llr_erasure_threshold: LLR_ERASURE_THRESHOLD_DEFAULT,
             m_enable_ldpc_feedback: true,
             m_max_ldpc_passes: LDPC_FEEDBACK_MAX_PASSES_DEFAULT,
@@ -186,6 +276,9 @@ impl<
         xdt: &mut f32,
         nharderrors: &mut i32,
         xsnr: &mut f32,
+        rescue: &mut u8,
+        deep: bool,
+        retry: bool,
         mut emit_event: E,
     ) -> Option<Decode>
     where
@@ -196,9 +289,6 @@ impl<
         let fr: f32 = 12000.0 / (Mode::NFFT1 as f32);
         let fs2: f32 = 12000.0 / (Mode::NDOWN as f32);
         let dt2: f32 = 1.0 / fs2;
-
-        let coarse_start_hz = *f1_hz;
-        let coarse_start_dt = *xdt;
 
         let index = (*f1_hz / fr).round() as i32;
         let index_u = index.clamp(0, (Mode::NSPS as i32) - 1) as usize;
@@ -253,6 +343,10 @@ impl<
         let sync = self.syncjs8d(i0, 0.0);
 
         let mut s2 = [[0.0f32; NN]; NROWS];
+        let mut bins = [[CZERO; NN]; NROWS];
+        let mut starts = [0i32; NN];
+        let mut shifts = [0i32; NN];
+        let mut hz = [0.0f32; NN];
 
         let mut freq_tracker = FrequencyTracker::new();
         freq_tracker.reset_default(0.0, f64::from(fs2));
@@ -357,7 +451,11 @@ impl<
                 for i in 0..NROWS {
                     let mag = libm::sqrtf(csymb[i].norm_sqr());
                     s2[i][k] = mag / 1000.0;
+                    bins[i][k] = csymb[i] / 1000.0;
                 }
+                starts[k] = i1_base;
+                shifts[k] = i1 - i1_base;
+                hz[k] = freq_tracker.current_hz() as f32;
 
                 let is_pilot = (k < 7) || (36..43).contains(&k) || (72..79).contains(&k);
                 if is_pilot {
@@ -401,6 +499,8 @@ impl<
         }
 
         let mut nsync: u32 = 0;
+        let mut expected = 0.0f64;
+        let mut other = 0.0f64;
         for (block, costas_row) in costas.iter().enumerate() {
             let offset = block * 36;
             for (col, costas_tone) in costas_row.iter().enumerate().take(7usize) {
@@ -416,13 +516,22 @@ impl<
                     }
                 }
 
+                for (row, mags) in s2.iter().enumerate() {
+                    let power = f64::from(mags[idx]).powi(2);
+                    if row == usize::from(*costas_tone) {
+                        expected += power;
+                    } else {
+                        other += power;
+                    }
+                }
                 if *costas_tone == best_row as u8 {
                     nsync += 1;
                 }
             }
         }
 
-        if nsync <= 6u32 {
+        let soft = expected / (other / 7.0 + 1e-12);
+        if nsync <= 6 && (!deep || !soft.is_finite() || soft < 1.5) {
             return None;
         }
 
@@ -436,206 +545,313 @@ impl<
             }));
         }
 
-        let mut s1 = [[0.0f32; ND]; NROWS];
-        for row in 0..NROWS {
-            for j in 0..29 {
-                s1[row][j] = s2[row][7 + j];
-            }
-            for j in 0..29 {
-                s1[row][29 + j] = s2[row][43 + j];
-            }
-        }
-
-        let mut symbol_winners = [0usize; ND];
-        for j in 0..ND {
-            let mut winner = 0usize;
-            let mut best = s1[0][j];
-            for (i, s1_row) in s1.iter().enumerate().take(NROWS).skip(1) {
-                let v = s1_row[j];
-                if v > best {
-                    best = v;
-                    winner = i;
-                }
-            }
-            symbol_winners[j] = winner;
-        }
-
-        let whitening = WhiteningProcessor::process::<NROWS, ND, { 3 * ND }>(
-            &s1,
-            &symbol_winners,
-            self.m_llr_erasure_threshold,
-        );
-
-        let mut llr0 = whitening.llr0;
-        let mut llr1 = whitening.llr1;
-
-        if !whitening.erasure_applied && self.m_llr_erasure_threshold > 0.0 {
-            for v in &mut llr0 {
-                if v.abs() < self.m_llr_erasure_threshold {
-                    *v = 0.0;
-                }
-            }
-            for v in &mut llr1 {
-                if v.abs() < self.m_llr_erasure_threshold {
-                    *v = 0.0;
-                }
-            }
-        }
-
+        let (llr0, llr1) = self.tone_llrs(&s2, &bins, &starts, &shifts, &hz);
         let ttl = Duration::from_secs((Mode::NTXDUR * 2) as u64);
         self.m_soft_combiner.flush(ttl);
-
+        self.legacy_combiner.flush(ttl);
         let key = self
             .m_soft_combiner
             .make_key(Mode::NSUBMODE, *f1_hz, *xdt, &llr0, &llr1);
-
-        let combined = self.m_soft_combiner.combine(key, &llr0, &llr1, ttl);
-
-        let mut llr0_combined = combined.llr0;
-        let mut llr1_combined = combined.llr1;
-
-        let mut decoded = [0i8; K];
-        let mut cw = [0i8; N];
-
-        let mut total_ldpc_passes: u8 = 0;
-        let f1_final = *f1_hz;
-        let dt_final = xdt2;
-
-        let max_ldpc_passes = self.m_max_ldpc_passes;
-        let enable_ldpc_feedback = self.m_enable_ldpc_feedback;
-        let llr_erasure_threshold = self.m_llr_erasure_threshold;
-
-        let mut try_decode = |llr_input: &[f32; N],
-                              ipass: u8,
-                              decoded: &mut [i8; K],
-                              cw: &mut [i8; N],
-                              nharderrors: &mut i32,
-                              xsnr: &mut f32|
-         -> Option<Decode> {
-            *nharderrors = bpdecode174(llr_input, decoded, cw);
-            *xsnr = -99.0;
-
-            if cw.iter().all(|&x| x == 0) {
-                return None;
-            }
-
-            let ok = (*nharderrors >= 0 && *nharderrors < 60)
-                && !(sync < 2.0 && *nharderrors > 35)
-                && !(ipass > 2 && *nharderrors > 39)
-                && !(ipass == 4 && *nharderrors > 30);
-
-            if ok && check_crc12(decoded) {
-                if sync_stats {
-                    emit_event(Event::SyncState(SyncState {
-                        kind: SyncStateType::Decoded,
-                        submode: Mode::NSUBMODE,
-                        frequency_hz: f1_final,
-                        time_offset_seconds: dt_final,
-                        metric: SyncMetric::Decoded(sync),
-                    }));
-                }
-
-                let message = extract_message_174(decoded);
-
-                let i3bit: u8 = ((i32::from(decoded[72]) << 2)
-                    | (i32::from(decoded[73]) << 1)
-                    | i32::from(decoded[74])) as u8;
-
-                let mut itone = [0u8; NN];
-                encode_with_costas(i3bit, costas, message.as_bytes(), &mut itone).unwrap();
-
-                if lsubtract {
-                    let refsig = self.genjs8refsig(&itone, f1_final);
-                    self.subtractjs8(&refsig, dt_final);
-                }
-
-                let mut xsig: f32 = 0.0;
-                for i in 0..NN {
-                    let tone = itone[i] as usize;
-                    let v = s2[tone][i];
-                    xsig = v.mul_add(v, xsig);
-                }
-
-                let mut inner = xsig / xbase - 1.0;
-                if inner < 1.259e-10 {
-                    inner = 1.259e-10;
-                }
-                let mut snr = 10.0f32.mul_add(libm::log10f(inner), -32.0);
-                if snr < -60.0 {
-                    snr = -60.0;
-                }
-                *xsnr = snr;
-
-                self.m_soft_combiner.mark_decoded(combined.key);
-
-                let bytes = message.as_bytes();
-                let data: [u8; 12] = bytes.try_into().unwrap();
-
-                return Some(Decode {
-                    type_id: i3bit,
-                    data,
-                });
-            }
-            *nharderrors = -1;
-            None
+        let combined = if retry {
+            SoftCombined { key, llr0, llr1 }
+        } else {
+            self.m_soft_combiner.combine(key, &llr0, &llr1, ttl)
         };
-
-        for ipass in 1u8..=4u8 {
-            if total_ldpc_passes >= max_ldpc_passes {
+        let mut llr0 = combined.llr0;
+        let llr1 = combined.llr1;
+        let mut bp = BpTry::new();
+        let opts = BpOpts::default();
+        let mut passes = 0;
+        let mut ok = false;
+        let mut legacy_key = None;
+        for pass in 1..=4 {
+            if passes >= self.m_max_ldpc_passes {
                 break;
             }
-
-            if ipass == 3 {
-                llr0_combined[..24].fill(0.0);
-            } else if ipass == 4 {
-                llr0_combined[24..48].fill(0.0);
+            if pass == 3 {
+                llr0[..24].fill(0.0);
             }
-
-            let llr_ref: &mut [f32; N] = if ipass == 2 {
-                &mut llr1_combined
-            } else {
-                &mut llr0_combined
-            };
-            let llr_primary: &[f32; N] = llr_ref;
-
-            if let Some(result) =
-                try_decode(llr_primary, ipass, &mut decoded, &mut cw, nharderrors, xsnr)
-            {
-                return Some(result);
+            if pass == 4 {
+                llr0[24..48].fill(0.0);
             }
-            total_ldpc_passes += 1;
-
-            if enable_ldpc_feedback && total_ldpc_passes < max_ldpc_passes {
-                let mut llr_refined = [0.0f32; N];
-                let mut confident: u32 = 0;
-                let mut uncertain: u32 = 0;
-
+            let llr = if pass == 2 { &llr1 } else { &llr0 };
+            if bp.run(llr, pass, sync, opts, true) {
+                ok = true;
+                break;
+            }
+            passes += 1;
+            if self.m_enable_ldpc_feedback && passes < self.m_max_ldpc_passes {
+                let mut refined = [0.0; N];
+                let (mut confident, mut uncertain) = (0, 0);
                 refine_llrs_with_ldpc_feedback(
-                    llr_primary,
-                    &cw,
-                    llr_erasure_threshold,
-                    &mut llr_refined,
+                    llr,
+                    &bp.cw,
+                    self.m_llr_erasure_threshold,
+                    &mut refined,
                     &mut confident,
                     &mut uncertain,
                 );
-
-                if let Some(result) = try_decode(
-                    &llr_refined,
-                    ipass,
-                    &mut decoded,
-                    &mut cw,
-                    nharderrors,
-                    xsnr,
-                ) {
-                    return Some(result);
+                if bp.run(&refined, pass, sync, opts, true) {
+                    ok = true;
+                    break;
                 }
-
-                total_ldpc_passes += 1;
+                passes += 1;
             }
         }
+        if !ok && !deep {
+            let (s1, winners) = Self::tone_mags(&s2);
+            let (lin, log) = WhiteningProcessor::fallback::<NROWS, ND, N>(&s1, &winners);
+            let key = self
+                .legacy_combiner
+                .make_key(Mode::NSUBMODE, *f1_hz, *xdt, &lin, &log);
+            let old = if retry {
+                SoftCombined {
+                    key,
+                    llr0: lin,
+                    llr1: log,
+                }
+            } else {
+                self.legacy_combiner.combine(key, &lin, &log, ttl)
+            };
+            legacy_key = Some(old.key);
+            let mut lin = old.llr0;
+            let log = old.llr1;
+            for pass in 1..=4 {
+                if pass == 3 {
+                    lin[..24].fill(0.0);
+                }
+                if pass == 4 {
+                    lin[24..48].fill(0.0);
+                }
+                let llr = if pass == 2 { &log } else { &lin };
+                if bp.run(llr, pass, sync, opts, false) {
+                    ok = true;
+                    break;
+                }
+                let mut refined = [0.0; N];
+                let (mut confident, mut uncertain) = (0, 0);
+                refine_llrs_with_ldpc_feedback(
+                    llr,
+                    &bp.cw,
+                    0.25,
+                    &mut refined,
+                    &mut confident,
+                    &mut uncertain,
+                );
+                if bp.run(&refined, pass, sync, opts, false) {
+                    ok = true;
+                    break;
+                }
+            }
+        }
+        if !ok && *rescue > 0 && bp.pass > 0 && bp.checks <= 12 {
+            *rescue -= 1;
+            for scale in [1.0, 0.8, 1.25] {
+                let llr = bp.near_llr;
+                let opts = BpOpts {
+                    max_iter: 80,
+                    early_abort: false,
+                    llr_scale: scale,
+                };
+                if bp.run(&llr, bp.pass, sync, opts, true) {
+                    ok = true;
+                    break;
+                }
+            }
+        }
+        if !ok
+            && (1..=aided::MAX_SYND).contains(&bp.checks)
+            && bp.near_cw.iter().any(|&b| b != 0)
+            && bp.near_llr.iter().all(|v| v.is_finite())
+        {
+            let bases = std::array::from_fn(|k| aided::Baseline {
+                start: (starts[k] + shifts[k]) as isize,
+                hz: hz[k],
+            });
+            let tones = aided::tones(&bp.near_cw, costas);
+            let weights = aided::weights(&bp.near_llr);
+            let refined = aided::refine(
+                &self.cd0[..NP2],
+                &bases,
+                NDOWNSPS,
+                f64::from(fs2),
+                &tones,
+                &weights,
+            );
+            if refined.accepted() {
+                let hyp = refined.best;
+                let mut mags = [[0.0; NN]; NROWS];
+                let mut cx = [[CZERO; NN]; NROWS];
+                let mut adj = shifts;
+                for k in 0..NN {
+                    let start = (bases[k].start + hyp.dt) as usize;
+                    adj[k] = start as i32 - starts[k];
+                    self.csymb
+                        .copy_from_slice(&self.cd0[start..start + NDOWNSPS]);
+                    if !aided::replay(&mut self.csymb[..], f64::from(hz[k]), f64::from(fs2)) {
+                        self.csymb.fill(CZERO);
+                    }
+                    for (n, v) in self.csymb.iter_mut().enumerate() {
+                        let t = (start + n) as f64 / f64::from(fs2);
+                        let phi = std::f64::consts::TAU * hyp.df * t
+                            + std::f64::consts::PI * hyp.drift * t * t;
+                        *v *= Complex32::from_polar(1.0, -phi as f32);
+                    }
+                    fft.process(&mut self.csymb[..]);
+                    for tone in 0..NROWS {
+                        cx[tone][k] = self.csymb[tone] / 1000.0;
+                        mags[tone][k] = self.csymb[tone].norm() / 1000.0;
+                    }
+                }
+                let (llr, _) = self.tone_llrs(&mags, &cx, &starts, &adj, &hz);
+                // don't combine samples twice
+                ok = bp.run(&llr, 1, sync, BpOpts::default(), false);
+                if !ok && *rescue > 0 {
+                    *rescue -= 1;
+                    for scale in [1.0, 0.8, 1.25] {
+                        let opts = BpOpts {
+                            max_iter: 80,
+                            early_abort: false,
+                            llr_scale: scale,
+                        };
+                        if bp.run(&llr, 1, sync, opts, false) {
+                            ok = true;
+                            break;
+                        }
+                    }
+                }
+                if ok {
+                    let weights =
+                        std::array::from_fn(|k| if aided::is_pilot(k) { 1.0 } else { 0.0 });
+                    if let Some(resid) = aided::mid_resid(
+                        hyp.df,
+                        hyp.drift,
+                        &bases,
+                        NDOWNSPS,
+                        f64::from(fs2),
+                        &weights,
+                    ) {
+                        *f1_hz += resid as f32;
+                        *xdt = xdt2 + hyp.dt as f32 * dt2;
+                    }
+                    s2 = mags;
+                }
+            }
+        }
+        if !ok {
+            *nharderrors = -1;
+            *xsnr = -99.0;
+            return None;
+        }
+        *nharderrors = bp.hard;
+        if sync_stats {
+            emit_event(Event::SyncState(SyncState {
+                kind: SyncStateType::Decoded,
+                submode: Mode::NSUBMODE,
+                frequency_hz: *f1_hz,
+                time_offset_seconds: *xdt,
+                metric: SyncMetric::Decoded(sync),
+            }));
+        }
+        let message = extract_message_174(&bp.dec);
+        let flags = ((bp.dec[72] << 2) | (bp.dec[73] << 1) | bp.dec[74]) as u8;
+        let mut tones = [0; NN];
+        encode_with_costas(flags, costas, message.as_bytes(), &mut tones).unwrap();
+        if lsubtract {
+            let raw = self.genjs8refsig(&tones, *f1_hz);
+            let sig = sic::refine(raw, &self.dd, &tones, Mode::NSPS, *xdt);
+            self.subtractjs8(&sig, *xdt);
+        }
+        let xsig: f32 = tones
+            .iter()
+            .enumerate()
+            .map(|(k, &tone)| s2[usize::from(tone)][k].powi(2))
+            .sum();
+        *xsnr = (10.0 * (xsig / xbase - 1.0).max(1.259e-10).log10() - 32.0).max(-60.0);
+        self.m_soft_combiner.mark_decoded(combined.key);
+        if let Some(key) = legacy_key {
+            self.legacy_combiner.mark_decoded(key);
+        }
+        Some(Decode {
+            type_id: flags,
+            data: message.as_bytes().try_into().unwrap(),
+        })
+    }
 
-        let _ = (coarse_start_hz, coarse_start_dt);
-        None
+    fn tone_mags(mags: &[[f32; NN]; NROWS]) -> ([[f32; ND]; NROWS], [usize; ND]) {
+        let s1 =
+            std::array::from_fn(|tone| std::array::from_fn(|j| mags[tone][aided::data_idx(j)]));
+        let winners = std::array::from_fn(|j| {
+            let mut best = 0;
+            for tone in 1..NROWS {
+                if s1[tone][j] > s1[best][j] {
+                    best = tone;
+                }
+            }
+            best
+        });
+        (s1, winners)
+    }
+
+    fn tone_llrs(
+        &self,
+        mags: &[[f32; NN]; NROWS],
+        bins: &[[Complex32; NN]; NROWS],
+        starts: &[i32; NN],
+        shifts: &[i32; NN],
+        hz: &[f32; NN],
+    ) -> ([f32; N], [f32; N]) {
+        let (s1, winners) = Self::tone_mags(mags);
+        let fs = 12000.0 / Mode::NDOWN as f64;
+        let mut pilots = Vec::with_capacity(21);
+        let mut count = [0; 3];
+        for (block, row) in Self::costas().iter().enumerate() {
+            for (col, &tone) in row.iter().enumerate() {
+                let k = block * 36 + col;
+                let val = bins[usize::from(tone)][k];
+                if val.norm().is_finite() && val.norm() > 0.0 {
+                    count[block] += 1;
+                    pilots.push(coherent::Pilot {
+                        time: f64::from(starts[k]) / fs,
+                        val: num_complex::Complex64::new(f64::from(val.re), f64::from(val.im)),
+                        tone: usize::from(tone),
+                        sym: k,
+                        shift: f64::from(shifts[k]),
+                        hz: f64::from(hz[k]),
+                    });
+                }
+            }
+        }
+        let blend = if count.iter().all(|&n| n >= 4) {
+            let data = std::array::from_fn(|j| {
+                let k = aided::data_idx(j);
+                coherent::Data {
+                    time: f64::from(starts[k]) / fs,
+                    shift: f64::from(shifts[k]),
+                    hz: f64::from(hz[k]),
+                    bins: std::array::from_fn(|tone| bins[tone][k]),
+                }
+            });
+            let span = f64::from(starts[NN - 1] + shifts[NN - 1] - starts[0] - shifts[0]) / fs;
+            coherent::scores::<ND>(&pilots, &data, 12, 0.5 * span, NDOWNSPS, fs)
+        } else {
+            None
+        };
+        let mut result = WhiteningProcessor::process::<NROWS, ND, N>(
+            &s1,
+            &winners,
+            self.m_llr_erasure_threshold,
+            blend.as_ref(),
+            LLR_SCALE_DEFAULT,
+        );
+        if !result.erasure_applied && self.m_llr_erasure_threshold > 0.0 {
+            for v in result.llr0.iter_mut().chain(&mut result.llr1) {
+                if v.abs() < self.m_llr_erasure_threshold {
+                    *v = 0.0;
+                }
+            }
+        }
+        (result.llr0, result.llr1)
     }
 
     #[inline]
@@ -835,7 +1051,7 @@ impl<
         mut nfa: i32,
         mut nfb: i32,
         spectrum_shift: Option<usize>,
-    ) -> Vec<Sync> {
+    ) -> [Vec<Sync>; 2] {
         let costas = Self::costas();
         let costas = costas.map(|row| row.map(usize::from));
 
@@ -1018,7 +1234,7 @@ impl<
         }
 
         if entries.is_empty() {
-            return Vec::new();
+            return [Vec::new(), Vec::new()];
         }
 
         let mut vals: Vec<f32> = entries.iter().map(|e| e.sync).collect();
@@ -1038,20 +1254,22 @@ impl<
                 .total_cmp(&a.sync)
                 .then_with(|| a.freq.total_cmp(&b.freq))
         });
-        let mut candidates = Vec::with_capacity(NMAXCAND.min(entries.len()));
+        let mut candidates: [Vec<Sync>; 2] =
+            [Vec::with_capacity(NMAXCAND.min(entries.len())), Vec::new()];
         for entry in entries {
-            if entry.sync < ASYNCMIN || entry.sync.is_nan() {
+            if entry.sync < 1.20 || entry.sync.is_nan() {
                 break;
             }
-
+            let band = usize::from(entry.sync < ASYNCMIN);
+            if candidates[band].len() >= if band == 0 { NMAXCAND } else { 24 } {
+                break;
+            }
             if candidates
                 .iter()
-                .all(|selected: &Sync| (entry.freq - selected.freq).abs() > Mode::AZ)
+                .flatten()
+                .all(|sel| (entry.freq - sel.freq).abs() > Mode::AZ)
             {
-                candidates.push(entry);
-                if candidates.len() == NMAXCAND {
-                    break;
-                }
+                candidates[band].push(entry);
             }
         }
 
@@ -1146,7 +1364,7 @@ impl<
     }
 
     fn subtractjs8(&mut self, cref: &[Complex32], dt: f32) {
-        let nstart: i32 = (dt * 12000.0) as i32;
+        let nstart = sic::start(dt);
         let cref_start: usize = if nstart < 0 { (-nstart) as usize } else { 0 };
         let dd_start: usize = if nstart > 0 { nstart as usize } else { 0 };
 
@@ -1174,10 +1392,14 @@ impl<
         let fft_inv = self.plans.get_or_create(FftPlanType::CB, Mode::NMAX, true);
         fft_inv.process(self.cfilt.as_mut_slice());
 
-        for i in 0..size {
-            let recon = self.cfilt[i] * cref[cref_start + i];
-            self.dd[dd_start + i] = 2.0f32.mul_add(-recon.re, self.dd[dd_start + i]);
-        }
+        sic::subtract(
+            &mut self.dd,
+            cref,
+            &self.cfilt[..size],
+            Mode::NSPS,
+            dt,
+            &mut self.sic_alt,
+        );
     }
 
     pub fn new() -> Self {
@@ -1238,20 +1460,20 @@ impl<
 
         let mut filt_sum = 0.0f32;
         for j in (-NFILT / 2)..=(NFILT / 2) {
-            let index = (j + NFILT / 2) as usize;
-            let value = powf(cosf(pi * (j as f32) / (NFILT as f32)), 2.0);
-            this.filter[index] = Complex32::new(value, 0.0);
-            filt_sum += value;
+            filt_sum += powf(cosf(pi * j as f32 / NFILT as f32), 2.0);
         }
-
-        for i in 0..=(NFILT as usize) {
-            let re = this.filter[i].re / filt_sum;
-            this.filter[i] = Complex32::new(re, 0.0);
+        // Negative taps wrap across the entire FFT, not the short kernel.
+        for j in (-NFILT / 2)..=(NFILT / 2) {
+            let idx = if j < 0 {
+                Mode::NMAX - (-j) as usize
+            } else {
+                j as usize
+            };
+            this.filter[idx] = Complex32::new(
+                powf(cosf(pi * j as f32 / NFILT as f32), 2.0) / filt_sum,
+                0.0,
+            );
         }
-        for i in (NFILT as usize + 1)..Mode::NMAX {
-            this.filter[i] = Complex32::new(0.0, 0.0);
-        }
-        this.filter[..=(NFILT as usize)].rotate_left((NFILT / 2) as usize);
         let fft = this.plans.get_or_create(FftPlanType::CF, Mode::NMAX, false);
         fft.process(this.filter.as_mut_slice());
         let factor = 1.0f32 / (Mode::NMAX as f32);
@@ -1343,33 +1565,58 @@ impl<
 
         let ttl = Duration::from_secs(ttl_secs_i32 as u64);
         self.m_soft_combiner.flush(ttl);
+        self.legacy_combiner.flush(ttl);
 
-        for ipass in 1..=3 {
+        let mut rescue = 4;
+        let mut stalled = false;
+        self.sic_alt = None;
+        for ipass in 1..=4 {
+            if stalled && ipass < 4 {
+                continue;
+            }
+            let retry = ipass == 4;
+            // uh
+            if retry {
+                let Some(alt) = self.sic_alt.take() else {
+                    break;
+                };
+                self.dd = alt;
+                #[cfg(feature = "experimental-time")]
+                {
+                    spectrum_valid = false;
+                }
+            }
             let shift = (ipass == 1).then_some(spectrum_shift).flatten();
             let mut candidates =
                 self.syncjs8(data.params.nfa as i32, data.params.nfb as i32, shift);
 
-            if candidates.is_empty() {
+            if candidates.iter().all(Vec::is_empty) {
+                if !retry && self.sic_alt.is_some() {
+                    stalled = true;
+                    continue;
+                }
                 break;
             }
             let nfqso = data.params.nfqso;
 
-            candidates.sort_unstable_by(|a, b| {
-                let a_dist = (a.freq - nfqso as f32).abs();
-                let b_dist = (b.freq - nfqso as f32).abs();
+            for band in &mut candidates {
+                band.sort_unstable_by(|a, b| {
+                    let a_dist = (a.freq - nfqso as f32).abs();
+                    let b_dist = (b.freq - nfqso as f32).abs();
 
-                if a_dist < 10.0 && b_dist >= 10.0 {
-                    return Ordering::Less;
-                }
-                if b_dist < 10.0 && a_dist >= 10.0 {
-                    return Ordering::Greater;
-                }
+                    if a_dist < 10.0 && b_dist >= 10.0 {
+                        return Ordering::Less;
+                    }
+                    if b_dist < 10.0 && a_dist >= 10.0 {
+                        return Ordering::Greater;
+                    }
 
-                match a_dist.total_cmp(&b_dist) {
-                    Ordering::Equal => a.freq.total_cmp(&b.freq),
-                    other => other,
-                }
-            });
+                    match a_dist.total_cmp(&b_dist) {
+                        Ordering::Equal => a.freq.total_cmp(&b.freq),
+                        other => other,
+                    }
+                });
+            }
 
             self.compute_baseband_fft();
 
@@ -1377,75 +1624,60 @@ impl<
 
             let mut improved = false;
 
-            for cand in candidates {
-                let mut f1 = cand.freq;
-                let mut xdt = cand.step;
-                let mut xsnr = 0.0f32;
-                let mut nharderrors = -1i32;
+            for (band, cands) in candidates.into_iter().enumerate() {
+                let deep = band == 1;
+                if deep && improved && ipass < 3 {
+                    continue;
+                }
+                for cand in cands {
+                    let mut f1 = cand.freq;
+                    let mut xdt = cand.step;
+                    let mut xsnr = 0.0f32;
+                    let mut nharderrors = -1i32;
 
-                let res = self.js8dec(
-                    data.params.sync_stats,
-                    subtract,
-                    &mut f1,
-                    &mut xdt,
-                    &mut nharderrors,
-                    &mut xsnr,
-                    &mut emit_event,
-                );
+                    let res = self.js8dec(
+                        data.params.sync_stats,
+                        subtract,
+                        &mut f1,
+                        &mut xdt,
+                        &mut nharderrors,
+                        &mut xsnr,
+                        &mut rescue,
+                        deep,
+                        retry,
+                        &mut emit_event,
+                    );
 
-                if let Some(decode) = res {
-                    #[cfg(feature = "experimental-time")]
-                    if subtract {
-                        spectrum_valid = false;
-                    }
-                    let snr = libm::roundf(xsnr) as i32;
-
-                    use std::collections::hash_map::Entry;
-
-                    match decodes.entry(decode) {
-                        Entry::Vacant(v) => {
-                            improved = true;
-
-                            let quality = 1.0f32 - (nharderrors as f32) / 60.0f32;
-
-                            let (text, msg_type) = {
-                                let dref = v.key();
-                                (
-                                    core::str::from_utf8(&dref.data)
-                                        .expect("JS8 decode produced non-UTF8 bytes")
-                                        .to_owned(),
-                                    dref.type_id,
-                                )
-                            };
-
-                            v.insert(snr);
-
-                            emit_event(Event::Decoded(Decoded::from_raw(
-                                text,
-                                FrameFlags::from_bits_truncate(msg_type),
-                                Mode::NSUBMODE,
-                                data.params.nutc,
-                                snr,
-                                xdt - Mode::ASTART,
-                                f1,
-                                quality,
-                            )));
+                    if let Some(decode) = res {
+                        #[cfg(feature = "experimental-time")]
+                        if subtract {
+                            spectrum_valid = false;
                         }
+                        let snr = libm::roundf(xsnr) as i32;
 
-                        Entry::Occupied(mut o) => {
-                            let prev = *o.get();
-                            if prev < snr {
+                        use std::collections::hash_map::Entry;
+
+                        match decodes.entry(decode) {
+                            Entry::Vacant(v) => {
                                 improved = true;
-                                *o.get_mut() = snr;
 
-                                let dref = o.key();
                                 let quality = 1.0f32 - (nharderrors as f32) / 60.0f32;
 
+                                let (text, msg_type) = {
+                                    let dref = v.key();
+                                    (
+                                        core::str::from_utf8(&dref.data)
+                                            .expect("JS8 decode produced non-UTF8 bytes")
+                                            .to_owned(),
+                                        dref.type_id,
+                                    )
+                                };
+
+                                v.insert(snr);
+
                                 emit_event(Event::Decoded(Decoded::from_raw(
-                                    core::str::from_utf8(&dref.data)
-                                        .expect("JS8 decode produced non-UTF8 bytes")
-                                        .to_owned(),
-                                    FrameFlags::from_bits_truncate(dref.type_id),
+                                    text,
+                                    FrameFlags::from_bits_truncate(msg_type),
                                     Mode::NSUBMODE,
                                     data.params.nutc,
                                     snr,
@@ -1454,13 +1686,40 @@ impl<
                                     quality,
                                 )));
                             }
+
+                            Entry::Occupied(mut o) => {
+                                let prev = *o.get();
+                                if prev < snr {
+                                    improved = true;
+                                    *o.get_mut() = snr;
+
+                                    let dref = o.key();
+                                    let quality = 1.0f32 - (nharderrors as f32) / 60.0f32;
+
+                                    emit_event(Event::Decoded(Decoded::from_raw(
+                                        core::str::from_utf8(&dref.data)
+                                            .expect("JS8 decode produced non-UTF8 bytes")
+                                            .to_owned(),
+                                        FrameFlags::from_bits_truncate(dref.type_id),
+                                        Mode::NSUBMODE,
+                                        data.params.nutc,
+                                        snr,
+                                        xdt - Mode::ASTART,
+                                        f1,
+                                        quality,
+                                    )));
+                                }
+                            }
                         }
                     }
                 }
             }
 
             if !improved {
-                break;
+                if retry || self.sic_alt.is_none() {
+                    break;
+                }
+                stalled = true;
             }
         }
 
@@ -1471,6 +1730,7 @@ impl<
             }
         }
 
+        self.sic_alt = None;
         decodes.len()
     }
 }
@@ -1592,6 +1852,7 @@ impl DecoderCore {
             let decoder = self.i.get_or_insert_with(|| Box::new(DecodeUltra::new()));
 
             sum += decoder.decode(&*data, &kpos, &ksz, stream_start(data, 4), &mut *emit);
+
             data.params.kpos_i = kpos;
             data.params.ksz_i = ksz;
         }
@@ -1602,6 +1863,7 @@ impl DecoderCore {
             let decoder = self.e.get_or_insert_with(|| Box::new(DecodeSlow::new()));
 
             sum += decoder.decode(&*data, &kpos, &ksz, stream_start(data, 3), &mut *emit);
+
             data.params.kpos_e = kpos;
             data.params.ksz_e = ksz;
         }
@@ -1612,6 +1874,7 @@ impl DecoderCore {
             let decoder = self.c.get_or_insert_with(|| Box::new(DecodeTurbo::new()));
 
             sum += decoder.decode(&*data, &kpos, &ksz, stream_start(data, 2), &mut *emit);
+
             data.params.kpos_c = kpos;
             data.params.ksz_c = ksz;
         }
@@ -1622,6 +1885,7 @@ impl DecoderCore {
             let decoder = self.b.get_or_insert_with(|| Box::new(DecodeFast::new()));
 
             sum += decoder.decode(&*data, &kpos, &ksz, stream_start(data, 1), &mut *emit);
+
             data.params.kpos_b = kpos;
             data.params.ksz_b = ksz;
         }
@@ -1632,6 +1896,7 @@ impl DecoderCore {
             let decoder = self.a.get_or_insert_with(|| Box::new(DecodeNormal::new()));
 
             sum += decoder.decode(&*data, &kpos, &ksz, stream_start(data, 0), &mut *emit);
+
             data.params.kpos_a = kpos;
             data.params.ksz_a = ksz;
         }

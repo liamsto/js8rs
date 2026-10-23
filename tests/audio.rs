@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 Liam Storgaard <liam-git@aqrx.net>
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use js8rs::protocol::{DecodeModes, Submode};
 use js8rs::rx::{DecodeConfig, Decoder, Event, SAMPLE_BUFFER_SIZE};
 
-fn parse_fixture_name(path: &Path) -> Option<(Submode, usize, usize)> {
+fn parse_fixture_name(path: &Path) -> Option<(Submode, usize)> {
     let name = path.file_name()?.to_str()?;
     if !name.ends_with(".wav") {
         return None;
@@ -18,7 +18,6 @@ fn parse_fixture_name(path: &Path) -> Option<(Submode, usize, usize)> {
     let mut parts = stem.split('_');
     let mode = parts.next()?;
     let depth = parts.next()?.parse::<usize>().ok()?;
-    let expected = parts.next()?.parse::<usize>().ok()?;
 
     let submode = match mode {
         "A" => Submode::Normal,
@@ -29,19 +28,19 @@ fn parse_fixture_name(path: &Path) -> Option<(Submode, usize, usize)> {
         _ => return None,
     };
 
-    Some((submode, depth, expected))
+    Some((submode, depth))
 }
 
 fn decode_mode_for(submode: Submode) -> DecodeModes {
     submode.into()
 }
 
-fn decode_count_for(
+fn dec_frames(
     decoder: &mut Decoder,
     samples: &[i16],
     submode: Submode,
     depth: usize,
-) -> usize {
+) -> BTreeSet<(u8, String)> {
     let nmax = submode.samples_per_period().max(1usize);
     let kin = samples.len().min(SAMPLE_BUFFER_SIZE).min(nmax);
     let mut ring = vec![0i16; SAMPLE_BUFFER_SIZE];
@@ -52,19 +51,15 @@ fn decode_count_for(
         .with_nominal_frequency(1500)
         .with_frequency_range(0, 5_000);
 
-    let mut unique = HashSet::new();
+    let mut unique = BTreeSet::new();
     for _ in 0..depth.max(1) {
         let _ = decoder.decode(&ring, kin, &config, |event| {
             if let Event::Decoded(done) = event {
-                unique.insert((
-                    done.frame.submode,
-                    done.frequency_hz.to_bits(),
-                    done.frame.encoded,
-                ));
+                unique.insert((done.frame.flags.bits(), done.frame.encoded));
             }
         });
     }
-    unique.len()
+    unique
 }
 
 fn read_wav_pcm16_mono(path: &Path) -> anyhow::Result<Vec<i16>> {
@@ -121,46 +116,64 @@ fn read_wav_pcm16_mono(path: &Path) -> anyhow::Result<Vec<i16>> {
 }
 
 #[test]
-fn fixture_decode_counts_match_expected() -> anyhow::Result<()> {
+fn wav_frames() -> anyhow::Result<()> {
     let root = PathBuf::from("tests/audio");
 
     let mut fixtures = Vec::new();
     for entry in fs::read_dir(&root)? {
         let entry = entry?;
         let path = entry.path();
-        if let Some((submode, depth, expected)) = parse_fixture_name(&path) {
-            fixtures.push((path, submode, depth, expected));
+        if let Some((submode, depth)) = parse_fixture_name(&path) {
+            fixtures.push((path, submode, depth));
         }
     }
     fixtures.sort_by(|a, b| a.0.cmp(&b.0));
     anyhow::ensure!(!fixtures.is_empty(), "no wav fixtures found");
 
-    let mut mismatches = Vec::new();
-    for (path, submode, depth, expected) in fixtures {
+    for (path, submode, depth) in fixtures {
+        let want: &[(u8, &str)] = match path.file_name().and_then(|n| n.to_str()) {
+            Some("A_1_4.wav" | "A_2_5.wav") => &[
+                (3, "2Y-wUW3FOjFp"),
+                (3, "SJWkJnSNwzqH"),
+                (3, "Vk4xfHSNwzaX"),
+                (3, "SKflsHSNwzqH"),
+                (3, "UctD9HSNwzqE"),
+            ],
+            Some("A_2_1.wav") => &[],
+            Some("A_2_3.wav" | "A_3_3.wav") => &[
+                (3, "VlPJy-uGBfqF"),
+                (3, "Uw2nt-xLZLqO"),
+                (1, "SJDRf-vSO3y0"),
+            ],
+            Some("A_2_6.wav") => &[
+                (0, "u3ipItc4eML+"),
+                (3, "SQu8I8l+CDqR"),
+                (3, "SJff78l+CDqP"),
+                (3, "SIUT18l+CDqE"),
+                (3, "VkB4eel+CDqS"),
+                (3, "VlKXp8l+CDqI"),
+            ],
+            Some("A_2_9.wav") => &[
+                (3, "SQu8IUuGBfqL"),
+                (3, "VlPJy-uGBfqI"),
+                (3, "SJff7UuGBfqY"),
+                (3, "Uw2nt-uGBfqS"),
+                (3, "SKgyQ-uGBfqU"),
+                (3, "VkNoM-uGBfqK"),
+                (3, "SIUT1UuGBfqb"),
+                (3, "VkDSPUuGBfqa"),
+            ],
+            Some("E_1_1.wav" | "E_2_1.wav") => &[(7, "TrMcT8++++++")],
+            _ => anyhow::bail!("missing expected frames for {}", path.display()),
+        };
         let samples = read_wav_pcm16_mono(&path)?;
         let mut decoder = Decoder::new();
-        let direct_count = decode_count_for(&mut decoder, &samples, submode, depth);
-        let expected_min = if submode == Submode::Normal && depth > 1 {
-            expected.saturating_sub(1)
-        } else {
-            expected
-        };
-        if !(expected_min..=expected).contains(&direct_count) {
-            mismatches.push(format!(
-                "{} depth={} got {} expected {}..={}",
-                path.display(),
-                depth,
-                direct_count,
-                expected_min,
-                expected,
-            ));
-        }
+        let got = dec_frames(&mut decoder, &samples, submode, depth);
+        let want = want
+            .iter()
+            .map(|&(flags, txt)| (flags, txt.to_owned()))
+            .collect();
+        assert_eq!(got, want, "{}", path.display());
     }
-
-    anyhow::ensure!(
-        mismatches.is_empty(),
-        "fixture mismatches:\n{}",
-        mismatches.join("\n")
-    );
     Ok(())
 }

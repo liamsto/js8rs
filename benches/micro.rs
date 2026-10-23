@@ -63,7 +63,6 @@ fn bench_detector_write(c: &mut Criterion) {
     ] {
         group.bench_with_input(BenchmarkId::from_parameter(name), samples, |b, samples| {
             b.iter_batched(
-                // A one-second period always aligns the detector cursor to zero.
                 || Detector::new(1, 1024),
                 |detector| {
                     let stats = detector.write_i16(black_box(samples), format);

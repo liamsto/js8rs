@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+pub(crate) mod aided;
+pub(crate) mod coherent;
 pub(crate) mod commons;
 pub(crate) mod consts;
 pub(crate) mod costas;
@@ -9,6 +11,7 @@ pub(crate) mod kalman;
 pub(crate) mod ldpc_feedback;
 pub(crate) mod local_routines;
 pub(crate) mod local_types;
+pub(crate) mod sic;
 pub(crate) mod soft_combiner;
 pub(crate) mod whitening_processor;
 

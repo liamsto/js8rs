@@ -98,14 +98,19 @@ pub(crate) fn synth_decode_fixture(submode: Submode, message: &str) -> DecodeFix
     let itones = encode_tones(enc.flags, submode, &enc.frame12).expect("encode_tones should work");
 
     let detector = Detector::new(1, 1024);
+    let start = detector.kin();
     modulate_into_detector(&itones, submode, &detector);
     let mut d2 = vec![0; SAMPLE_BUFFER_SIZE];
     let kin_end = detector.copy_samples(&mut d2);
+    // The detector's initial cursor follows the wall clock, even with a one-second period.
+    let valid_samples = kin_end - start;
+    d2.copy_within(start..kin_end, 0);
+    d2[valid_samples..].fill(0);
 
     DecodeFixture {
         d2,
         config: bench_config(submode),
-        valid_samples: kin_end,
+        valid_samples,
         encoded: enc.encoded,
     }
 }

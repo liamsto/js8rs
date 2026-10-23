@@ -170,7 +170,6 @@ impl FftPlanManager {
 }
 
 pub mod belief_decoder {
-
     use crate::internal::consts::{K, M, N};
 
     use libm::{atanhf, tanhf};
@@ -716,108 +715,240 @@ pub mod belief_decoder {
         },
     ];
 
-    /// Belief-propagation decode for N=174, K=87, M=87.
-    ///
-    /// Returns:
-    /// - `>= 0`: number of bit decisions inconsistent with channel LLR signs
-    /// - `-1`: decoding failed / early-stopped
-    pub fn bpdecode174(llr: &[f32; N], decoded: &mut [i8; K], cw: &mut [i8; N]) -> i32 {
+    const EDGE: [[usize; BP_MAX_ROWS]; M] = {
+        let mut map = [[usize::MAX; BP_MAX_ROWS]; M];
+        let mut seen = [[false; BP_MAX_CHECKS]; N];
+        let mut chk = 0;
+        while chk < M {
+            assert!(NM[chk].valid_neighbors <= BP_MAX_ROWS);
+            let mut e = 0;
+            while e < NM[chk].valid_neighbors {
+                let bit = NM[chk].neighbors[e];
+                assert!(bit < N);
+                let mut matches = 0;
+                let mut k = 0;
+                while k < BP_MAX_CHECKS {
+                    if MN[bit][k] == chk as i32 {
+                        assert!(!seen[bit][k]);
+                        seen[bit][k] = true;
+                        map[chk][e] = k;
+                        matches += 1;
+                    }
+                    k += 1;
+                }
+                assert!(matches == 1);
+                e += 1;
+            }
+            chk += 1;
+        }
+        let mut bit = 0;
+        while bit < N {
+            let mut e = 0;
+            while e < BP_MAX_CHECKS {
+                assert!(seen[bit][e]);
+                e += 1;
+            }
+            bit += 1;
+        }
+        map
+    };
+
+    #[derive(Clone, Copy)]
+    pub struct BpOpts {
+        pub max_iter: usize,
+        pub early_abort: bool,
+        pub llr_scale: f32,
+    }
+
+    impl Default for BpOpts {
+        fn default() -> Self {
+            Self {
+                max_iter: BP_MAX_ITERATIONS,
+                early_abort: true,
+                llr_scale: 1.0,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    pub struct BpRes {
+        pub hard_err: i32,
+        pub iter: usize,
+        pub final_checks: usize,
+        pub best_checks: usize,
+        pub early_abort: bool,
+        pub best_cw: [i8; N],
+        pub best_cw_valid: bool,
+    }
+
+    fn channel_llr(v: f32) -> f32 {
+        if v.is_nan() { 0.0 } else { v.clamp(-8.0, 8.0) }
+    }
+
+    fn check_msg(v: f32) -> f32 {
+        let lim = 1.0 - f32::EPSILON;
+        2.0 * atanhf(-v.clamp(-lim, lim))
+    }
+
+    pub fn bpdecode174(
+        llr: &[f32; N],
+        decoded: &mut [i8; K],
+        cw: &mut [i8; N],
+        opts: BpOpts,
+    ) -> BpRes {
+        let ch = llr.map(|v| channel_llr(v * opts.llr_scale));
         let mut tov = [[0.0f32; BP_MAX_CHECKS]; N];
         let mut toc = [[0.0f32; BP_MAX_ROWS]; M];
         let mut tanhtoc = [[0.0f32; BP_MAX_ROWS]; M];
         let mut zn = [0.0f32; N];
-        let mut synd = [0i32; M];
-        let mut ncnt: i32 = 0;
-        let mut nclast: i32 = 0;
+        let mut res = BpRes {
+            hard_err: -1,
+            iter: 0,
+            final_checks: M,
+            best_checks: M + 1,
+            early_abort: false,
+            best_cw: [0; N],
+            best_cw_valid: false,
+        };
+        let mut ncnt = 0;
+        let mut nclast = 0;
         for i in 0..M {
-            let vn = NM[i].valid_neighbors;
-            for (j, bit) in NM[i].neighbors.iter().copied().take(vn).enumerate() {
-                toc[i][j] = llr[bit];
+            for (j, bit) in NM[i]
+                .neighbors
+                .iter()
+                .copied()
+                .take(NM[i].valid_neighbors)
+                .enumerate()
+            {
+                toc[i][j] = ch[bit];
             }
         }
-        for iter in 0..=BP_MAX_ITERATIONS {
+        for iter in 0..=opts.max_iter {
+            res.iter = iter;
             for i in 0..N {
-                zn[i] = llr[i] + tov[i][0] + tov[i][1] + tov[i][2];
-            }
-
-            for i in 0..N {
+                zn[i] = ch[i] + (tov[i][0] + tov[i][1] + tov[i][2]);
                 cw[i] = i8::from(zn[i] > 0.0);
             }
 
-            let mut ncheck: i32 = 0;
-            for i in 0..M {
-                let mut sum: i32 = 0;
-                let vn = NM[i].valid_neighbors;
-                for j in 0..vn {
-                    sum += i32::from(cw[NM[i].neighbors[j]]);
-                }
-                synd[i] = sum;
-                if (sum & 1) != 0 {
-                    ncheck += 1;
-                }
+            let mut ncheck = 0;
+            for node in &NM {
+                let sum: i32 = node.neighbors[..node.valid_neighbors]
+                    .iter()
+                    .map(|&bit| i32::from(cw[bit]))
+                    .sum();
+                ncheck += usize::from((sum & 1) != 0);
             }
-
+            res.final_checks = ncheck;
+            if ncheck < res.best_checks {
+                res.best_checks = ncheck;
+                res.best_cw = *cw;
+                res.best_cw_valid = true;
+            }
             if ncheck == 0 {
-                decoded[..K].copy_from_slice(&cw[M..(K + M)]);
-
-                let mut nerr: i32 = 0;
-                for i in 0..N {
-                    let hard = (2 * i32::from(cw[i]) - 1) as f32;
-                    if hard * llr[i] < 0.0 {
-                        nerr += 1;
-                    }
-                }
-                return nerr;
+                decoded.copy_from_slice(&cw[M..]);
+                res.hard_err = cw
+                    .iter()
+                    .zip(llr)
+                    .filter(|&(bit, v)| (2 * i32::from(*bit) - 1) as f32 * v < 0.0)
+                    .count() as i32;
+                return res;
             }
-
             if iter > 0 {
-                let nd = ncheck - nclast;
-                ncnt = if nd < 0 { 0 } else { ncnt + 1 };
-                if ncnt >= 5 && (iter as i32) >= 10 && ncheck > 15 {
-                    return -1;
+                ncnt = if ncheck < nclast { 0 } else { ncnt + 1 };
+                if opts.early_abort && ncnt >= 5 && iter >= 10 && ncheck > 15 {
+                    res.early_abort = true;
+                    return res;
                 }
             }
             nclast = ncheck;
 
             for i in 0..M {
-                let vn = NM[i].valid_neighbors;
-                for (j, bit) in NM[i].neighbors.iter().copied().take(vn).enumerate() {
-                    let mut msg = zn[bit];
-                    for k in 0..BP_MAX_CHECKS {
-                        if MN[bit][k] == i as i32 {
-                            msg -= tov[bit][k];
-                        }
-                    }
-
-                    toc[i][j] = msg;
-                }
-            }
-            for i in 0..M {
-                for j in 0..BP_MAX_ROWS {
+                for j in 0..NM[i].valid_neighbors {
+                    let bit = NM[i].neighbors[j];
+                    toc[i][j] = zn[bit] - tov[bit][EDGE[i][j]];
                     tanhtoc[i][j] = tanhf(-toc[i][j] * 0.5);
                 }
             }
-
-            for i in 0..N {
-                for j in 0..BP_MAX_CHECKS {
-                    let ichk_i32 = MN[i][j];
-                    if ichk_i32 >= 0 {
-                        let ichk = ichk_i32 as usize;
-
-                        let mut tmn: f32 = 1.0;
-                        let vn = NM[ichk].valid_neighbors;
-                        for (k, neighbor) in NM[ichk].neighbors.iter().take(vn).enumerate() {
-                            if *neighbor != i {
-                                tmn *= tanhtoc[ichk][k];
-                            }
+            for chk in 0..M {
+                for e in 0..NM[chk].valid_neighbors {
+                    let mut prod = 1.0;
+                    for (k, &v) in tanhtoc[chk][..NM[chk].valid_neighbors].iter().enumerate() {
+                        if k != e {
+                            prod *= v;
                         }
-
-                        tov[i][j] = 2.0 * atanhf(-tmn);
                     }
+                    tov[NM[chk].neighbors[e]][EDGE[chk][e]] = check_msg(prod);
                 }
             }
         }
+        // Feedback keeps the final iterate; rescue uses the first best syndrome.
+        res
+    }
 
-        -1
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn bp_bounds() {
+            assert_eq!(channel_llr(f32::NAN), 0.0);
+            assert_eq!(channel_llr(f32::INFINITY), 8.0);
+            assert_eq!(channel_llr(f32::NEG_INFINITY), -8.0);
+            for v in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+                assert!(check_msg(v).is_finite());
+                assert_eq!(check_msg(v), -check_msg(-v));
+            }
+            let tones =
+                crate::encoder::encode(3, crate::protocol::Submode::Normal, b"HELLO-WORLD+")
+                    .unwrap();
+            let bits: Vec<i8> = tones[7..36]
+                .iter()
+                .chain(&tones[43..72])
+                .flat_map(|tone| (0..3).rev().map(move |b| ((tone >> b) & 1) as i8))
+                .collect();
+            let mut llr = std::array::from_fn(|i| if bits[i] == 1 { 1e20 } else { -1e20 });
+            llr[5] = -llr[5];
+            let mut cw = [0; N];
+            let mut dec = [0; K];
+            let res = bpdecode174(&llr, &mut dec, &mut cw, BpOpts::default());
+            assert_eq!(res.hard_err, 1);
+            assert_eq!(cw.as_slice(), bits);
+            assert_eq!(res.best_checks, 0);
+        }
+
+        #[test]
+        fn bp_best_word() {
+            let mut rng = 1u32;
+            let llr = std::array::from_fn(|_| {
+                rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (rng >> 8) as f32 / (1u32 << 24) as f32 * 8.0 - 4.0
+            });
+            let mut dec = [7; K];
+            let mut cw = [0; N];
+            let mut best = [0; N];
+            let mut min = M + 1;
+            for max_iter in 0..=30 {
+                let res = bpdecode174(
+                    &llr,
+                    &mut dec,
+                    &mut cw,
+                    BpOpts {
+                        max_iter,
+                        early_abort: false,
+                        ..BpOpts::default()
+                    },
+                );
+                assert_eq!(res.hard_err, -1);
+                assert_eq!(dec, [7; K]);
+                if res.final_checks < min {
+                    min = res.final_checks;
+                    best = cw;
+                }
+                assert_eq!(res.best_checks, min);
+                assert_eq!(res.best_cw, best);
+                assert_eq!(res.iter, max_iter);
+            }
+            assert_ne!(cw, best);
+        }
     }
 }

@@ -59,6 +59,7 @@ fn bench_full_chain_fast(c: &mut Criterion) {
                     black_box(&enc.frame12),
                 )
                 .expect("encode_tones should work");
+                let start = detector.kin();
                 modulate_into_detector_with_buffers(
                     &tones,
                     Submode::Fast,
@@ -69,11 +70,15 @@ fn bench_full_chain_fast(c: &mut Criterion) {
                 let (decoded_count, n_events) = detector.with_samples(|samples, kin_end| {
                     let config = bench_config(Submode::Fast);
                     let mut n_events = 0usize;
-                    let decoded_count =
-                        decoder.decode(samples, kin_end, &config, |event: Event| {
+                    let decoded_count = decoder.decode(
+                        &samples[start..],
+                        kin_end - start,
+                        &config,
+                        |event: Event| {
                             black_box(&event);
                             n_events += 1;
-                        });
+                        },
+                    );
                     (decoded_count, n_events)
                 });
 

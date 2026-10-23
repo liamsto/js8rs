@@ -2,7 +2,8 @@
 //
 // Copyright (C) 2025 Punk Kaos <punk.kaos@gmail.com>
 
-pub const LLR_ERASURE_THRESHOLD_DEFAULT: f32 = 0.25;
+pub const LLR_ERASURE_THRESHOLD_DEFAULT: f32 = 0.0;
+pub const LLR_SCALE_DEFAULT: f32 = 2.0;
 pub const LLR_FEEDBACK_CONFIDENT_MIN: f32 = 3.0;
 pub const LLR_FEEDBACK_UNCERTAIN_MAX: f32 = 1.0;
 pub const LLR_FEEDBACK_CONFIDENT_BOOST: f32 = 1.2;
@@ -62,6 +63,23 @@ pub const fn refine_llrs_with_ldpc_feedback<const N: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn weak_llr() {
+        let mut out = [0.0; 3];
+        let mut conf = 0;
+        let mut uncertain = 0;
+        refine_llrs_with_ldpc_feedback(
+            &[0.25, -0.5, 8.0],
+            &[1, 0, 1],
+            LLR_ERASURE_THRESHOLD_DEFAULT,
+            &mut out,
+            &mut conf,
+            &mut uncertain,
+        );
+        assert_eq!(out, [0.125, -0.25, 6.0]);
+        assert_eq!((conf, uncertain), (1, 2));
+    }
 
     #[test]
     fn non_finite_llrs_are_erased_without_stalling() {
